@@ -23,6 +23,12 @@
   <em>Independent open-source project. Not affiliated with or endorsed by Anthropic. Claude and Claude Code are trademarks of Anthropic.</em>
 </p>
 
+> **This is a security-hardened fork.** It adds checksum-verified installation, a
+> pinned git-commit supply chain, an isolated/egress-filtered Docker deployment,
+> and a heuristic source audit script on top of upstream free-claude-code. See
+> [Security](#security) for what these controls do and their honest limitations
+> before relying on them.
+
 ## What You Get
 
 - **48 ToS-friendly providers. 1.3B+ free tokens every month.** Use free, paid, subscription, and local models from one searchable UI without putting your account at risk. FCC follows provider terms and removes integrations if they stop being allowed.
@@ -595,6 +601,179 @@ Windows PowerShell:
 ```powershell
 & ([scriptblock]::Create((irm "https://raw.githubusercontent.com/Alishahryar1/free-claude-code/main/scripts/uninstall.ps1")))
 ```
+
+## Security
+
+This is a fork of upstream free-claude-code focused on hardening how the
+project is **distributed and executed**, not a rewrite of its proxy logic. The
+controls below address three concrete risks: an install script piped from the
+internet into `sh`/PowerShell with no integrity check, an unpinned software
+supply chain (`main.zip`, rolling vendor installers, floating base images),
+and a local LLM proxy that holds provider API keys and routes model traffic —
+each a real target if the install path or the running process is tampered
+with or over-exposed. None of this is a claim that the project is "secure,"
+"unhackable," or has been independently audited or certified — see
+[Caveats and limitations](#caveats-and-limitations) below for what is
+deliberately still unverified or out of scope.
+
+### Hardened installer
+
+`scripts/install.sh` verifies every downloaded installer script or release
+artifact (Claude Code, Codex, Pi, OpenCode, Hermes, Grok Build, Muse Code
+installers; the pinned `uv` release archive; the RTK release archive) against
+a SHA256 in [`scripts/install.checksums`](scripts/install.checksums) **before**
+it is executed or extracted.
+
+- **Fail-closed by default.** If a component's manifest entry is missing or
+  still the literal placeholder `REPLACE_ME`, the installer refuses to run
+  that component rather than executing it unverified.
+- **Populate hashes with trust-on-first-use.** Run the refresh mode on each
+  platform you install on, review the printed hashes against a trusted
+  source (e.g. the vendor's release page), then paste the reviewed lines into
+  the manifest yourself — the installer never edits the manifest or executes
+  anything in this mode:
+
+  ```bash
+  scripts/install.sh --refresh-checksums
+  ```
+
+- **Explicit escape hatch, not a default.** `--allow-unpinned` disables
+  verification for components still unpinned and prints a warning banner; it
+  is opt-in and intended for cases where you've already made a trust
+  decision another way.
+- **RTK's shipped hashes are real, not placeholders.** The four
+  `rtk-0.44.2-*` rows in `install.checksums` are genuine pinned hashes carried
+  over from the original installer, verified rather than fabricated.
+
+### Pinned supply chain
+
+Instead of installing from an unversioned `main.zip`, `install.sh` clones the
+repository and checks out a specific commit before installing:
+
+```bash
+git clone https://github.com/alishahryar1/free-claude-code
+git -C free-claude-code checkout --detach "$FCC_COMMIT"
+```
+
+The script then verifies the checked-out `HEAD` equals the pinned commit
+before proceeding, and installs with `uv tool install --locked`, so the
+resolved `uv.lock` dependency closure is honored rather than allowed to
+float. The pinned commit is overridable for testing or auditing a different
+revision:
+
+```bash
+scripts/install.sh --fcc-ref <full-40-char-commit-sha>
+```
+
+Passing a ref that isn't a full 40-character commit SHA (a branch or tag
+name) still works but is **not** cryptographically pinned, and the installer
+warns accordingly.
+
+### Containerized, isolated runtime
+
+[`Dockerfile`](Dockerfile), [`docker-compose.yml`](docker-compose.yml), and
+[`.dockerignore`](.dockerignore) define an isolated deployment for the
+`fcc-server` proxy:
+
+- Runs as a fixed non-root user (uid/gid `10001`), never root.
+- Root filesystem is `read_only: true`; only sized `tmpfs` mounts (`/tmp`,
+  `/home/fcc`) are writable, matching everywhere the app itself writes state
+  (logs, messaging session state, the OpenAI/Codex credential cache).
+- `cap_drop: ALL` and `security_opt: no-new-privileges:true`.
+- Resource ceilings: `pids_limit`, `mem_limit`, `mem_reservation`, `cpus`.
+- The proxy port is published loopback-only (`127.0.0.1:8082:8082`), never on
+  a LAN- or internet-reachable interface.
+- Secrets come from `env_file: .env`, read once at container creation — never
+  baked into the image or bind-mounted as a browsable file.
+- `docker-compose.yml` documents host paths that must **never** be
+  bind-mounted into any service — `~/.aws`, `~/.kube`, `~/.ssh`,
+  `~/.config/gcloud`, `~/.docker`, `/var/run/docker.sock`, `~/.anthropic`,
+  `~/.claude` — since any of these hands the container a real credential
+  store or, in the Docker-socket case, effective host root.
+
+Build and run it with:
+
+```bash
+docker compose up --build
+```
+
+### Egress filtering
+
+`fcc-server` sits on an `internal: true` Docker network with no default
+route to the internet. The only way out is a Squid sidecar
+([`egress/squid.conf`](egress/squid.conf)) on a second network, enforcing a
+deny-by-default `dstdomain` allowlist
+([`egress/allowed-domains.txt`](egress/allowed-domains.txt)) of the ~42
+provider hosts this codebase actually calls (extracted from
+`provider_catalog.py`), plus two regex ACLs for Bedrock Mantle and Vertex
+AI's region-varying hostnames. Squid tunnels TLS (`CONNECT`) without
+terminating it — no `ssl_bump`, no injected CA — so request/response bodies,
+including auth headers, stay end-to-end encrypted between `fcc-server` and
+the provider; Squid only ever sees the destination hostname and port.
+
+To allow an additional host, add it to `egress/allowed-domains.txt` and
+reload:
+
+```bash
+docker compose exec egress-proxy squid -k reconfigure
+```
+
+### Source audit tooling
+
+[`scripts/audit.sh`](scripts/audit.sh) is a heuristic, grep-based scan of the
+Python source tree for patterns that look like unauthorized secret logging or
+exfiltration — env-var dumps, headers/tokens passed into `print()`/`logger.*`,
+secret-shaped values written to disk, and outbound HTTP calls carrying
+secret-shaped payloads.
+
+```bash
+scripts/audit.sh
+```
+
+Findings are tagged **HIGH** or one of several INFO-tier labels
+(`ALLOWLISTED`, `GATED`, `REDACTED`, `REVIEW`). The script exits `1` only if
+a **HIGH** finding remains — those warrant a direct look at the surrounding
+code. INFO-tier findings (e.g. a match near a `LOG_RAW_*` debug flag, near a
+`redact*()` helper, or a static message that merely mentions a keyword like
+"token") still print for visibility but don't fail the scan; `EXFIL` matches
+are always INFO-tier (`REVIEW`) at most, since this proxy's entire job is
+forwarding a credential to an upstream provider and grep cannot tell an
+intended provider host from an attacker-controlled one.
+
+### Caveats and limitations
+
+- **Rolling vendor installers are trust-on-first-use, not vendor-pinned.**
+  Claude Code, Codex, Pi, OpenCode, Hermes, Grok Build, and Muse Code publish
+  no stable upstream checksum for their install scripts, so `--refresh-checksums`
+  pins the exact bytes you personally reviewed at that moment — not a hash
+  the vendor itself published. It also only pins the *installer script*, not
+  the binaries or packages that script subsequently downloads and installs.
+- **Container base images are tag-pinned, not digest-pinned.** `python:3.14-slim`,
+  `ghcr.io/astral-sh/uv`, and `ubuntu/squid:latest` are referenced by tag.
+  A specific current digest could not be verified from the environment this
+  fork was authored in, and fabricating a digest would be worse than leaving
+  it tag-pinned. Resolve and pin `@sha256:<digest>` for each image before any
+  production deployment.
+- **`web_fetch` does not work under this egress topology, and it's not just
+  an allowlist gap.** It opens its own DNS-pinned connection and defaults to
+  ignoring proxy environment variables, so it never reaches the Squid
+  sidecar at all — fixing it requires a code change (passing `trust_env`/an
+  explicit proxy through to its HTTP client), not a config change.
+  `web_search` does go through the proxy but is blocked by default because
+  its target isn't an LLM provider host; add it to
+  `egress/allowed-domains.txt` if you want it enabled.
+- **`scripts/audit.sh` is a heuristic pattern scan, not a parser or a taint
+  analyzer.** It can miss a secret laundered through an extra variable or
+  dynamic attribute access, and it can flag a line that only mentions a
+  keyword in English prose. Treat it as a prompt for human review, not proof
+  of safety.
+- **The checksum manifest ships mostly unpopulated.** Only RTK's four hashes
+  are pre-filled; every vendor installer and `uv` platform row starts as
+  `REPLACE_ME` until you run `--refresh-checksums` yourself and paste in
+  reviewed hashes — by design, so no hash is ever fabricated on your behalf.
+- **This repository is currently private.** It has not been independently
+  audited, and no third party has certified any of the controls described
+  above.
 
 ## Project Links
 
