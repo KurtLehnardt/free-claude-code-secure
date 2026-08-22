@@ -50,3 +50,17 @@ rtk-0.44.2-x86_64-unknown-linux-musl=d94cc2a3e57fa534892b5235a726e7eeb7523f205a5
 rtk-0.44.2-aarch64-unknown-linux-gnu=5cd3f7fa2697faf9e5b77a10ce4e699006e02d4752d792f06550697eb4b8e8a9
 rtk-0.44.2-x86_64-apple-darwin=636f808db86b2cefab7db7dd9393da8b6e4721bb2ffaa0644e3ffa52d3420d81
 rtk-0.44.2-aarch64-apple-darwin=b7c2218eca538b54e63fa594a8ce58bd3716851b01b3b0dc026515323baf6393
+
+# --- npm packages (Cline, DeepSeek Harness): pinned to an exact version -------
+# --- (never a floating "latest"), fetched via `npm pack` into an isolated -----
+# --- temp dir (a plain artifact download; no lifecycle scripts run for a ------
+# --- registry spec), sha256-verified against the row below, and only THEN -----
+# --- installed globally via `npm install -g <verified-tarball>`. Not ----------
+# --- platform-specific -- one row covers every OS/arch. Residual trust: this --
+# --- verifies the package ARTIFACT; it does not sandbox the package's own -----
+# --- preinstall/postinstall scripts, which still run with your user's --------
+# --- privileges during the final `npm install -g` step, same as any npm ------
+# --- package -- that is inherent to npm's package model, not a gap in this ----
+# --- installer's verification. -------------------------------------------------
+npm-cline-3.0.55=REPLACE_ME
+npm-dsh-0.1.0-rc.8=REPLACE_ME

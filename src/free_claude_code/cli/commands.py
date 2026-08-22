@@ -1,20 +1,72 @@
 """Implementations for installed Free Claude Code commands."""
 
+import ipaddress
 import threading
 import time
 import webbrowser
 from enum import StrEnum
 
 import uvicorn
+from loguru import logger
 
 from free_claude_code.cli.launchers.common import preflight_proxy
 from free_claude_code.cli.process_registry import kill_all_best_effort
 from free_claude_code.config.loader import clear_settings_cache, get_settings
+from free_claude_code.config.paths import proxy_auth_token_path
+from free_claude_code.config.proxy_auth import is_public_default_proxy_token
 from free_claude_code.config.server_urls import local_admin_url, local_proxy_root_url
 from free_claude_code.config.settings import Settings
 from free_claude_code.runtime.bootstrap import build_asgi_app
 
 SERVER_GRACEFUL_SHUTDOWN_SECONDS = 5
+
+
+def _host_is_loopback(host: str) -> bool:
+    normalized = host.strip().strip("[]").lower()
+    if normalized in {"", "localhost"}:
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def enforce_exposure_safety(settings: Settings) -> None:
+    """Refuse to start when bound to a non-loopback host without real auth.
+
+    Fail-safe on exposure: a network-reachable proxy must require a strong,
+    non-default token. Loopback binds (the default) are always allowed.
+    """
+
+    if _host_is_loopback(settings.host):
+        return
+    problems: list[str] = []
+    if not settings.proxy_auth_enabled:
+        problems.append("proxy authentication is disabled (PROXY_AUTH_ENABLED=false)")
+    if is_public_default_proxy_token(settings.proxy_auth_token):
+        problems.append("the proxy auth token is unset or the public default")
+    if not problems:
+        return
+    raise SystemExit(
+        f"Refusing to start: HOST={settings.host!r} is not a loopback address but "
+        + " and ".join(problems)
+        + ".\n"
+        "Bind HOST=127.0.0.1 for local use, or set PROXY_AUTH_ENABLED=true and a "
+        "strong ANTHROPIC_AUTH_TOKEN before exposing the proxy on the network."
+    )
+
+
+def log_proxy_auth_token_location(settings: Settings) -> None:
+    """Note where the generated proxy auth token lives (path only, never the value)."""
+
+    if not settings.proxy_auth_enabled:
+        return
+    token_path = proxy_auth_token_path()
+    if token_path.is_file():
+        logger.info(
+            "Proxy authentication is enabled; the auth token is stored at {}",
+            token_path,
+        )
 
 
 def serve() -> None:

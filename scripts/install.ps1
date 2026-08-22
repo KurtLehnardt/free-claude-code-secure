@@ -1,3 +1,19 @@
+# npm-distributed agents (Cline, DeepSeek Harness) are pinned to an exact
+# version (never a floating "latest") and are fetched via `npm pack` into an
+# isolated temp dir -- a plain artifact download that runs no lifecycle
+# scripts -- so the tarball can be sha256-verified against the same
+# scripts/install.checksums manifest scripts/install.sh uses, before it is
+# installed. Unlike install.sh, this script has no --allow-unpinned /
+# --refresh-checksums escape hatch, so an unpinned (REPLACE_ME/missing) hash
+# WARNS and proceeds rather than failing closed -- failing closed here with
+# no way to opt out would make these agents uninstallable on Windows by
+# default. Run `scripts/install.sh --refresh-checksums` on any platform (npm
+# packages are not platform-specific) to compute a real hash, review it
+# against a trusted source, and paste it into install.checksums for a hard
+# fail-closed guarantee on Windows too. Residual trust: this verifies the
+# package ARTIFACT; it does not sandbox the package's own preinstall/
+# postinstall scripts, which still run with your user's privileges during
+# the final `npm install -g`, same as any npm package.
 param(
     [switch] $VoiceNim,
     [switch] $VoiceLocal,
@@ -24,6 +40,11 @@ $PiInstallUrl = "https://pi.dev/install.ps1"
 $OpenCodeReleaseBaseUrl = "https://github.com/anomalyco/opencode/releases/latest/download"
 $MinOpenCodeVersion = "1.18.18"
 $MinClineVersion = "3.0.55"
+# Exact npm pin for fresh Cline installs (no floating "latest"). An
+# already-installed Cline satisfying >=MinClineVersion is left unchanged;
+# see Ensure-Cline. Pinned to the same version because it is also the oldest
+# version this installer has verified compatible.
+$ClinePackage = "cline@$MinClineVersion"
 $HermesInstallUrl = "https://hermes-agent.nousresearch.com/install.ps1"
 $MinHermesVersion = "0.20.4"
 $DshVersion = "0.1.0-rc.8"
@@ -70,6 +91,9 @@ function Show-Usage {
 Usage: install.ps1 [options]
 
 Installs or updates Free Claude Code and lets you choose which coding agents to install or verify.
+npm-distributed agents (Cline, DeepSeek Harness) are pinned to an exact version and verified against
+scripts/install.checksums (via `npm pack` + sha256) before install when a hash is pinned there; see
+the comment at the top of this script for how that manifest is populated.
 
 Options:
   -VoiceNim              Install NVIDIA NIM voice transcription support.
@@ -225,6 +249,125 @@ function Get-ApplicationCommand {
     }
 
     return $commands[0]
+}
+
+# Reads scripts/install.checksums (the same manifest install.sh uses) beside
+# this script and returns the pinned sha256 for $ComponentId, or $null if the
+# file or the row is missing. Format: "<component-id>=<sha256>"; blank lines
+# and lines starting with '#' are ignored, matching install.sh's parser.
+function Get-PinnedChecksum {
+    param([string] $ComponentId)
+
+    $scriptDirectory = if ($PSScriptRoot) { $PSScriptRoot } else { Get-Location }
+    $manifestPath = Join-Path $scriptDirectory "install.checksums"
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        return $null
+    }
+
+    foreach ($line in Get-Content -LiteralPath $manifestPath) {
+        $trimmedLine = $line.Trim()
+        if (($trimmedLine.Length -eq 0) -or $trimmedLine.StartsWith("#")) {
+            continue
+        }
+        $separatorIndex = $trimmedLine.IndexOf("=")
+        if ($separatorIndex -lt 0) {
+            continue
+        }
+        $key = $trimmedLine.Substring(0, $separatorIndex).Trim()
+        if ($key -ne $ComponentId) {
+            continue
+        }
+        $value = $trimmedLine.Substring($separatorIndex + 1)
+        $commentIndex = $value.IndexOf("#")
+        if ($commentIndex -ge 0) {
+            $value = $value.Substring(0, $commentIndex)
+        }
+        return $value.Trim()
+    }
+
+    return $null
+}
+
+# Fetches the exact published npm tarball for $PackageSpec via `npm pack`
+# into an isolated temp dir. `npm pack` on a registry spec is a plain
+# artifact download -- it does not run the target package's lifecycle
+# scripts -- so the downloaded bytes can be sha256-verified against
+# scripts/install.checksums (via Get-PinnedChecksum) before anything is
+# installed. Only after that check does it install globally FROM the
+# verified local tarball, so the bytes that get installed are exactly the
+# bytes that were hashed.
+#
+# Unlike install.sh's npm_pack_verify_and_install_global, this does not fail
+# closed when the manifest has no pinned hash yet (REPLACE_ME/missing): this
+# script has no --allow-unpinned/--refresh-checksums flags to opt back in,
+# so failing closed by default would make Cline/DeepSeek Harness
+# uninstallable on Windows out of the box. It warns instead and proceeds.
+# Pin a real hash (see the header comment at the top of this file) to get a
+# hard fail-closed guarantee on Windows too.
+#
+# Residual trust: this verifies the package ARTIFACT. It does not sandbox
+# the npm package's own preinstall/postinstall scripts, which still run
+# with the invoking user's privileges during the final `npm install -g`,
+# same as any npm package.
+function Install-NpmPackageVerified {
+    param(
+        [string] $PackageSpec,
+        [string] $Label,
+        [string] $ComponentId
+    )
+
+    if ($DryRun) {
+        Write-Host "+ npm pack $PackageSpec --pack-destination <temporary-dir> --ignore-scripts"
+        Write-Host "+ verify sha256 of the packed $Label tarball against install.checksums (component: $ComponentId)"
+        Write-Host "+ npm install -g --no-fund --no-audit=false <verified-tarball>"
+        return
+    }
+
+    $npm = Get-ApplicationCommand "npm"
+    if (-not $npm) {
+        throw "$Label installation requires npm."
+    }
+
+    $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("fcc-npm-pack-" + [guid]::NewGuid().ToString("N"))
+    try {
+        New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
+
+        Invoke-NativeCommand -FilePath $npm.Source -Arguments @("pack", $PackageSpec, "--pack-destination", $temporaryRoot, "--ignore-scripts")
+
+        $tarballs = @(Get-ChildItem -LiteralPath $temporaryRoot -Filter "*.tgz")
+        if ($tarballs.Count -eq 0) {
+            throw "npm pack did not produce a tarball for $Label ($PackageSpec)."
+        }
+        $tarballPath = $tarballs[0].FullName
+
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        $tarballStream = [IO.File]::OpenRead($tarballPath)
+        try {
+            $actualHash = [BitConverter]::ToString($sha256.ComputeHash($tarballStream)).Replace("-", "").ToLowerInvariant()
+        }
+        finally {
+            $tarballStream.Dispose()
+            $sha256.Dispose()
+        }
+
+        $expectedHash = Get-PinnedChecksum -ComponentId $ComponentId
+        if ($expectedHash -and ($expectedHash -ne "REPLACE_ME")) {
+            if ($actualHash -ne $expectedHash) {
+                throw "Checksum verification failed for $Label (component id: $ComponentId): expected $expectedHash, computed $actualHash. Refusing to continue."
+            }
+            Write-Host "Verified $Label against pinned sha256 (component id: $ComponentId)."
+        }
+        else {
+            Write-Warning "No pinned sha256 for component `"$ComponentId`" ($Label) in install.checksums; installing with sha256=$actualHash unverified. See scripts/install.sh --refresh-checksums to pin one."
+        }
+
+        Invoke-NativeCommand -FilePath $npm.Source -Arguments @("install", "-g", "--no-fund", "--no-audit=false", $tarballPath)
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporaryRoot) {
+            Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Get-PowerShellExecutable {
@@ -838,7 +981,7 @@ function Ensure-Cline {
             Write-Host "A compatible Cline will be preserved; an older version will be upgraded with cline update."
         }
         elseif (Get-ApplicationCommand "npm") {
-            Write-Host "+ npm install -g cline"
+            Install-NpmPackageVerified -PackageSpec $ClinePackage -Label "Cline $MinClineVersion" -ComponentId "npm-cline-$MinClineVersion"
         }
         else {
             throw "Cline installation requires npm. Install Node.js from https://nodejs.org/en/download, then rerun the installer."
@@ -858,11 +1001,10 @@ function Ensure-Cline {
         Invoke-NativeCommand -FilePath $command.Source -Arguments @("update")
     }
     else {
-        $npm = Get-ApplicationCommand "npm"
-        if (-not $npm) {
+        if (-not (Get-ApplicationCommand "npm")) {
             throw "Cline installation requires npm. Install Node.js from https://nodejs.org/en/download, then rerun the installer."
         }
-        Invoke-NativeCommand -FilePath $npm.Source -Arguments @("install", "-g", "cline")
+        Install-NpmPackageVerified -PackageSpec $ClinePackage -Label "Cline $MinClineVersion" -ComponentId "npm-cline-$MinClineVersion"
     }
 
     Add-NpmBinDirectories
@@ -1125,8 +1267,8 @@ function Confirm-DshApplication {
 }
 
 function Install-Dsh {
-    $npmPath = Confirm-DshToolchain
-    Invoke-NativeCommand -FilePath $npmPath -Arguments @("install", "-g", $DshPackage)
+    [void] (Confirm-DshToolchain)
+    Install-NpmPackageVerified -PackageSpec $DshPackage -Label "DeepSeek Harness $DshVersion" -ComponentId "npm-dsh-$DshVersion"
     Add-NpmBinDirectories
 }
 
@@ -1144,8 +1286,7 @@ function Ensure-Dsh {
             if ((-not $node) -or (-not $npm)) {
                 throw "DeepSeek Harness requires Node.js ^22.19.0 or >=24.0.0 and npm. Install Node.js, then rerun the installer."
             }
-            $npmPath = $npm.Source
-            Write-Host "+ $(Format-Command -FilePath $npmPath -Arguments @('install', '-g', $DshPackage))"
+            Install-NpmPackageVerified -PackageSpec $DshPackage -Label "DeepSeek Harness $DshVersion" -ComponentId "npm-dsh-$DshVersion"
         }
         Confirm-DshApplication
         return

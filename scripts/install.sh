@@ -9,6 +9,17 @@ set -eu
 # missing or the literal token REPLACE_ME is refused unless --allow-unpinned is
 # passed. Free Claude Code itself is installed from a git checkout pinned to an
 # exact commit, not an unversioned archive.
+#
+# npm-distributed agents (Cline, DeepSeek Harness) are pinned to an exact
+# version (never a floating "latest") and are fetched via `npm pack` into an
+# isolated temp dir -- a plain artifact download that runs no lifecycle
+# scripts -- so the downloaded tarball can be sha256-verified against the same
+# manifest and FAIL-CLOSED policy as every other component before anything is
+# installed. Residual trust: this verifies the package ARTIFACT; it does not
+# and cannot sandbox the package's own preinstall/postinstall scripts, which
+# still execute with your user's privileges during the final
+# `npm install -g <verified-tarball>` step, same as any npm package. That is a
+# property of npm's package model, not a gap in this installer's verification.
 
 FCC_REPO_URL="https://github.com/alishahryar1/free-claude-code"
 # Default pinned Free Claude Code commit (real, verified main HEAD).
@@ -25,6 +36,11 @@ PI_INSTALL_URL="https://pi.dev/install.sh"
 OPENCODE_INSTALL_URL="https://opencode.ai/install"
 MIN_OPENCODE_VERSION="1.18.18"
 MIN_CLINE_VERSION="3.0.55"
+# Exact npm pin for fresh Cline installs (no floating "latest"). An
+# already-installed Cline satisfying >=MIN_CLINE_VERSION is left unchanged;
+# see ensure_cline. Pinned to the same version because it is also the oldest
+# version this installer has verified compatible.
+CLINE_PACKAGE="cline@$MIN_CLINE_VERSION"
 HERMES_INSTALL_URL="https://hermes-agent.nousresearch.com/install.sh"
 MIN_HERMES_VERSION="0.20.4"
 DSH_VERSION="0.1.0-rc.8"
@@ -76,9 +92,10 @@ show_usage() {
 Usage: install.sh [options]
 
 Installs or updates Free Claude Code and lets you choose which coding agents to install or verify.
-Every downloaded installer script and release artifact is checksum-verified against a pinned
-manifest (scripts/install.checksums) before it runs. Unpinned components are refused unless you
-explicitly pass --allow-unpinned.
+Every downloaded installer script and release artifact -- including npm-distributed agents (Cline,
+DeepSeek Harness), which are pinned to an exact version and packed via `npm pack` for verification
+before install -- is checksum-verified against a pinned manifest (scripts/install.checksums) before
+it runs. Unpinned components are refused unless you explicitly pass --allow-unpinned.
 
 Options:
   --voice-nim              Install NVIDIA NIM voice transcription support.
@@ -436,6 +453,41 @@ refresh_one() {
     rm -f "$refresh_tmp"
 }
 
+# Like refresh_one, but for an npm package: fetches the exact published
+# tarball via `npm pack` (no lifecycle scripts run) instead of curl, then
+# hashes it. Requires npm; silently skipped (with a comment) if unavailable
+# so --refresh-checksums still works on platforms without Node.js.
+refresh_npm_pack() {
+    refresh_id=$1
+    refresh_spec=$2
+
+    if ! command -v npm >/dev/null 2>&1; then
+        printf '# %s: npm not available; skipping\n' "$refresh_id" >&2
+        return 0
+    fi
+
+    refresh_dir=$(mktemp -d "${TMPDIR:-/tmp}/fcc-refresh-npm.XXXXXX") || {
+        printf '# %s: could not create a temporary directory\n' "$refresh_id" >&2
+        return 0
+    }
+    if npm pack "$refresh_spec" --pack-destination "$refresh_dir" --ignore-scripts >/dev/null 2>&1; then
+        refresh_tarball=$(find "$refresh_dir" -maxdepth 1 -name '*.tgz' -type f | head -n 1)
+        if [ -n "$refresh_tarball" ] && [ -f "$refresh_tarball" ]; then
+            refresh_hash=$(compute_sha256 "$refresh_tarball") || refresh_hash=""
+            if [ -n "$refresh_hash" ]; then
+                printf '%s=%s\n' "$refresh_id" "$refresh_hash"
+            else
+                printf '# %s: could not compute sha256\n' "$refresh_id" >&2
+            fi
+        else
+            printf '# %s: npm pack did not produce a tarball (%s)\n' "$refresh_id" "$refresh_spec" >&2
+        fi
+    else
+        printf '# %s: npm pack failed (%s)\n' "$refresh_id" "$refresh_spec" >&2
+    fi
+    rm -rf "$refresh_dir"
+}
+
 refresh_all_checksums() {
     printf '# install.sh --refresh-checksums output.\n'
     printf '# Review every hash against a trusted source (vendor release page / published\n'
@@ -452,6 +504,8 @@ refresh_all_checksums() {
     refresh_one "$uv_component_id" "$uv_archive_url"
     select_rtk_release
     refresh_one "$rtk_component_id" "$rtk_archive_url"
+    refresh_npm_pack "npm-cline-$MIN_CLINE_VERSION" "$CLINE_PACKAGE"
+    refresh_npm_pack "npm-dsh-$DSH_VERSION" "$DSH_PACKAGE"
 }
 
 add_path_entry() {
@@ -618,6 +672,58 @@ download_verify_and_run() {
 
     rm -f "$temporary_file"
     temporary_file=""
+}
+
+# npm_pack_verify_and_install_global PACKAGE_SPEC LABEL COMPONENT_ID
+#
+# Fetches the exact published npm tarball for PACKAGE_SPEC via `npm pack`
+# into an isolated temp dir. `npm pack` on a registry spec is a plain
+# artifact download -- it does not run the target package's lifecycle
+# scripts -- so the downloaded bytes can be sha256-verified against the
+# pinned manifest exactly like every other downloaded artifact in this
+# installer (see verify_downloaded_file), fail-closed by the same
+# --allow-unpinned policy. Only after verification does it install globally
+# FROM the verified local tarball, so the bytes that get installed are
+# exactly the bytes that were hashed (no second, unverified registry
+# round-trip).
+#
+# Residual trust: this verifies the package ARTIFACT. It does not sandbox
+# the npm package's own preinstall/postinstall scripts, which still run
+# with the invoking user's privileges during the final `npm install -g`,
+# same as any npm package -- that is inherent to npm's package model and is
+# not fixable with a shell-level checksum gate alone.
+npm_pack_verify_and_install_global() {
+    package_spec=$1
+    label=$2
+    component_id=$3
+
+    if [ "$dry_run" -eq 1 ]; then
+        print_command npm pack "$package_spec" --pack-destination "<temporary-dir>" --ignore-scripts
+        printf '+ verify sha256 of the packed %s tarball against %s (component: %s)\n' "$label" "$checksums_file" "$component_id"
+        print_command npm install -g --no-fund --no-audit=false "<verified-tarball>"
+        return 0
+    fi
+
+    require_command npm
+
+    temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/fcc-npm-pack.XXXXXX") || fail "Unable to create a temporary directory for $label."
+    print_command npm pack "$package_spec" --pack-destination "$temporary_dir" --ignore-scripts
+    if npm pack "$package_spec" --pack-destination "$temporary_dir" --ignore-scripts >/dev/null; then
+        :
+    else
+        status=$?
+        fail "Could not download the $label npm package ($package_spec; npm pack exit code $status)."
+    fi
+
+    npm_tarball=$(find "$temporary_dir" -maxdepth 1 -name '*.tgz' -type f | head -n 1)
+    [ -n "$npm_tarball" ] && [ -f "$npm_tarball" ] || fail "npm pack did not produce a tarball for $label ($package_spec)."
+
+    verify_downloaded_file "$npm_tarball" "$label" "$component_id"
+
+    run npm install -g --no-fund --no-audit=false "$npm_tarball"
+
+    rm -rf "$temporary_dir"
+    temporary_dir=""
 }
 
 verify_command() {
@@ -965,7 +1071,7 @@ ensure_cline() {
             print_command cline --version
             printf 'A compatible Cline will be preserved; an older version will be upgraded with cline update.\n'
         elif command -v npm >/dev/null 2>&1; then
-            print_command npm install -g cline
+            npm_pack_verify_and_install_global "$CLINE_PACKAGE" "Cline $MIN_CLINE_VERSION" "npm-cline-$MIN_CLINE_VERSION"
         else
             fail "Cline installation requires npm. Install Node.js from https://nodejs.org/en/download, then rerun the installer."
         fi
@@ -983,7 +1089,7 @@ ensure_cline() {
         run cline update
     else
         command -v npm >/dev/null 2>&1 || fail "Cline installation requires npm. Install Node.js from https://nodejs.org/en/download, then rerun the installer."
-        run npm install -g cline
+        npm_pack_verify_and_install_global "$CLINE_PACKAGE" "Cline $MIN_CLINE_VERSION" "npm-cline-$MIN_CLINE_VERSION"
     fi
 
     add_npm_bin_directories
@@ -1150,7 +1256,7 @@ verify_dsh_command() {
 
 install_dsh_package() {
     require_dsh_toolchain
-    run npm install -g "$DSH_PACKAGE"
+    npm_pack_verify_and_install_global "$DSH_PACKAGE" "DeepSeek Harness $DSH_VERSION" "npm-dsh-$DSH_VERSION"
     add_npm_bin_directories
 }
 
@@ -1164,7 +1270,7 @@ ensure_dsh() {
         else
             command -v node >/dev/null 2>&1 || fail "DeepSeek Harness requires Node.js ^22.19.0 or >=24.0.0 and npm. Install Node.js, then rerun the installer."
             command -v npm >/dev/null 2>&1 || fail "DeepSeek Harness requires npm. Install npm, then rerun the installer."
-            print_command npm install -g "$DSH_PACKAGE"
+            npm_pack_verify_and_install_global "$DSH_PACKAGE" "DeepSeek Harness $DSH_VERSION" "npm-dsh-$DSH_VERSION"
         fi
         verify_dsh_command
         return 0

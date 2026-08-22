@@ -41,7 +41,7 @@ def test_settings_defaults_are_valid_and_nonempty() -> None:
     assert settings.whisper_device == "cpu"
     assert settings.whisper_model == "base"
     assert settings.enable_web_server_tools is True
-    assert settings.proxy_auth_enabled is False
+    assert settings.proxy_auth_enabled is True
     assert settings.proxy_auth_token == "freecc"
     assert [
         name for name, value in settings if isinstance(value, str) and not value

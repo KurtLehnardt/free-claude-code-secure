@@ -72,11 +72,48 @@ def _origin_is_local(origin: str | None) -> bool:
     return _is_loopback_host(parsed.hostname)
 
 
+# httpx/Starlette TestClient sentinel Host; not internet-routable, so a rebinding page
+# cannot cause the browser to send it (see admin DNS-rebinding hardening).
+_TESTCLIENT_HOST = "testserver"
+# Headers set only by an intermediary proxy. A direct local admin client (browser on
+# localhost, or an FCC launcher) never sends these, so their presence means the request
+# was forwarded and the transport peer cannot be trusted for the loopback decision.
+_FORWARDED_HEADERS = ("x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded")
+
+
+def _host_header_hostname(host_header: str) -> str:
+    host = host_header.strip()
+    if host.startswith("["):
+        end = host.find("]")
+        return host if end == -1 else host[: end + 1]
+    return host.split(":", 1)[0]
+
+
+def _admin_host_header_is_local(host_header: str | None) -> bool:
+    if not host_header:
+        return False
+    hostname = _host_header_hostname(host_header)
+    if hostname.lower() == _TESTCLIENT_HOST:
+        return True
+    return _is_loopback_host(hostname)
+
+
 def require_loopback_admin(request: Request) -> None:
-    """Allow admin access only from the local machine."""
+    """Allow admin access only from the local machine.
+
+    Defends the admin surface against (a) LAN reachability, (b) DNS rebinding via a
+    Host-header allowlist, and (c) ``X-Forwarded-For`` spoofing when the proxy is
+    deployed behind a trusting reverse proxy (``FORWARDED_ALLOW_IPS=*``).
+    """
+
+    if any(header in request.headers for header in _FORWARDED_HEADERS):
+        raise HTTPException(status_code=403, detail="Admin UI is local-only")
 
     client_host = request.client.host if request.client else None
     if not _is_loopback_host(client_host):
+        raise HTTPException(status_code=403, detail="Admin UI is local-only")
+
+    if not _admin_host_header_is_local(request.headers.get("host")):
         raise HTTPException(status_code=403, detail="Admin UI is local-only")
 
     origin = request.headers.get("origin")

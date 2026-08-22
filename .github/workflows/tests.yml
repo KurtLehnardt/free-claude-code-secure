@@ -1,6 +1,7 @@
 # Branch protection: require every status check this workflow reports, for example:
 #   Ban suppressions and legacy annotations
-#   ruff-format, ruff-check, ty, pytest, playwright
+#   ruff-format, ruff-check, ty, pytest, playwright, deps-audit
+#   secrets-scan
 # GitHub may prefix with the workflow name (e.g. "CI / ruff-format"); use the names the branch protection UI offers after a run.
 
 name: CI
@@ -65,6 +66,11 @@ jobs:
               uv run pytest e2e -n 0 -v --tb=short
               --tracing=retain-on-failure --screenshot=only-on-failure
               --full-page-screenshot --output=test-results
+          - id: deps-audit
+            run: |
+              uv export --locked --no-emit-workspace --no-header --no-annotate \
+                --output-file "$RUNNER_TEMP/fcc-deps-audit.txt"
+              uvx pip-audit -r "$RUNNER_TEMP/fcc-deps-audit.txt" --no-deps
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -134,3 +140,32 @@ jobs:
           path: test-results/
           if-no-files-found: ignore
           retention-days: 7
+
+  secrets-scan:
+    name: secrets-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          # gitleaks needs full history (not the default shallow clone) to scan the
+          # commit range introduced by this PR, not just the checked-out tree.
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Only required for GitHub Organization-owned repos, not personal accounts;
+          # safe to leave unset (evaluates to an empty string, gitleaks-action no-ops it).
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+          # No pull-requests: write permission is granted above, so disable the
+          # PR-comment/artifact/summary features that would need it — this job's only
+          # job is to fail the check; findings are visible in the step log either way.
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          GITLEAKS_ENABLE_SUMMARY: "false"

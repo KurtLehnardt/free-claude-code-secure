@@ -8,6 +8,7 @@ included at top level for easy grep/filter.
 
 import json
 import logging
+import os
 import re
 import threading
 from pathlib import Path
@@ -19,6 +20,30 @@ _current_path: Path | None = None
 _current_level = "INFO"
 _current_verbose: bool | None = None
 _sink_id: int | None = None
+
+
+def _harden_log_permissions(log_path: Path) -> None:
+    """Restrict the log file (0600) and its ~/.fcc directories (0700).
+
+    The server log holds request/session metadata; mirror the owner-only posture
+    every other credential path in this codebase already uses. Best-effort: a
+    permission failure never blocks logging.
+    """
+
+    if os.name == "nt":
+        return
+    targets = (
+        (log_path, 0o600),
+        (log_path.parent, 0o700),
+        (log_path.parent.parent, 0o700),
+    )
+    for path, mode in targets:
+        try:
+            if path.exists():
+                path.chmod(mode)
+        except OSError:
+            pass
+
 
 _THIRD_PARTY_LOGGERS = (
     "httpx",
@@ -158,6 +183,7 @@ def configure_logging(
 
     log_path = Path(log_file).expanduser().resolve()
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    _harden_log_permissions(log_path)
 
     if (
         _configured
@@ -174,6 +200,7 @@ def configure_logging(
         logger.remove()
 
         log_path.write_text("")
+        _harden_log_permissions(log_path)
 
         _sink_id = _add_file_sink(log_path, level)
 

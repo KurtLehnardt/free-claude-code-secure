@@ -1,5 +1,6 @@
 """Shared filesystem paths for Free Claude Code configuration."""
 
+import os
 from pathlib import Path
 
 FCC_CONFIG_DIRNAME = ".fcc"
@@ -9,6 +10,7 @@ LEGACY_XDG_CONFIG_DIRNAME = ".config"
 MESSAGING_STATE_DIRNAME = "agent_workspace"
 FCC_LOGS_DIRNAME = "logs"
 SERVER_LOG_FILENAME = "server.log"
+PROXY_AUTH_TOKEN_FILENAME = "proxy_auth_token"
 CODEX_MODEL_CATALOG_FILENAME = "codex-model-catalog.json"
 AUTH_DIRNAME = "auth"
 OPENAI_AUTH_FILENAME = "openai.json"
@@ -20,6 +22,25 @@ def config_dir_path() -> Path:
     """Return the default user config directory."""
 
     return Path.home() / FCC_CONFIG_DIRNAME
+
+
+def ensure_config_dir() -> Path:
+    """Create and return ``~/.fcc`` with owner-only (0700) permissions."""
+
+    directory = config_dir_path()
+    directory.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        try:
+            directory.chmod(0o700)
+        except OSError:
+            pass
+    return directory
+
+
+def proxy_auth_token_path() -> Path:
+    """Return the persisted, auto-generated proxy auth token path."""
+
+    return config_dir_path() / PROXY_AUTH_TOKEN_FILENAME
 
 
 def managed_env_path() -> Path:

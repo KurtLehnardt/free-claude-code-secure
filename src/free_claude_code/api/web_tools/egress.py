@@ -5,6 +5,38 @@ import socket
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+# Well-known NAT64 prefix (RFC 6052): embeds an IPv4 address in its low 32 bits. A
+# NAT64 gateway translates ``64:ff9b::7f00:1`` back to ``127.0.0.1``, so such a
+# literal must be judged by the embedded IPv4, not by ``is_global`` (which is True).
+_NAT64_WELL_KNOWN_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _embedded_ipv4(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | None:
+    """Return the IPv4 address embedded in an IPv6 literal, if any."""
+
+    if not isinstance(ip, ipaddress.IPv6Address):
+        return None
+    if ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    if ip.sixtofour is not None:
+        return ip.sixtofour
+    if ip in _NAT64_WELL_KNOWN_PREFIX:
+        return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    return None
+
+
+def _egress_ip_is_blocked(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> bool:
+    """Return True when an address is non-global or embeds a non-global IPv4."""
+
+    if not ip.is_global:
+        return True
+    embedded = _embedded_ipv4(ip)
+    return embedded is not None and not embedded.is_global
+
 
 @dataclass(frozen=True, slots=True)
 class WebFetchEgressPolicy:
@@ -80,7 +112,7 @@ def get_validated_stream_addrinfos_for_egress(
         parsed_ip = None
 
     if parsed_ip is not None:
-        if not parsed_ip.is_global:
+        if _egress_ip_is_blocked(parsed_ip):
             raise WebFetchEgressViolation(
                 f"Non-public IP host {host!r} is not allowed for web_fetch"
             )
@@ -93,7 +125,7 @@ def get_validated_stream_addrinfos_for_egress(
             resolved = ipaddress.ip_address(addr)
         except ValueError:
             continue
-        if not resolved.is_global:
+        if _egress_ip_is_blocked(resolved):
             raise WebFetchEgressViolation(
                 f"Host {host!r} resolves to a non-public address ({resolved})"
             )
