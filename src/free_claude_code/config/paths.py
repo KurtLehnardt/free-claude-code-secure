@@ -1,5 +1,6 @@
 """Shared filesystem paths for Free Claude Code configuration."""
 
+import contextlib
 import os
 from pathlib import Path
 
@@ -10,7 +11,7 @@ LEGACY_XDG_CONFIG_DIRNAME = ".config"
 MESSAGING_STATE_DIRNAME = "agent_workspace"
 FCC_LOGS_DIRNAME = "logs"
 SERVER_LOG_FILENAME = "server.log"
-PROXY_AUTH_TOKEN_FILENAME = "proxy_auth_token"
+PROXY_AUTH_TOKEN_FILENAME = "proxy_auth_token"  # noqa: S105  # filename, not a secret value
 CODEX_MODEL_CATALOG_FILENAME = "codex-model-catalog.json"
 AUTH_DIRNAME = "auth"
 OPENAI_AUTH_FILENAME = "openai.json"
@@ -30,10 +31,8 @@ def ensure_config_dir() -> Path:
     directory = config_dir_path()
     directory.mkdir(parents=True, exist_ok=True)
     if os.name != "nt":
-        try:
+        with contextlib.suppress(OSError):
             directory.chmod(0o700)
-        except OSError:
-            pass
     return directory
 
 

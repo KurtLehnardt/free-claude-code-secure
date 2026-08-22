@@ -14,13 +14,13 @@ from pydantic import (
 
 from .constants import HTTP_CONNECT_TIMEOUT_DEFAULT
 from .nim import NimSettings
-from .proxy_auth import PUBLIC_DEFAULT_PROXY_AUTH_TOKEN
 from .provider_catalog import (
     BEDROCK_DEFAULT_BASE,
     NARAROUTE_DEFAULT_BASE,
     SUPPORTED_PROVIDER_IDS,
     TOKENROUTER_DEFAULT_BASE,
 )
+from .proxy_auth import PUBLIC_DEFAULT_PROXY_AUTH_TOKEN
 from .reasoning import ReasoningPreference
 
 

@@ -38,9 +38,7 @@ def test_body_within_limit_is_processed() -> None:
 
 
 def test_zero_limit_disables_the_cap() -> None:
-    app = create_test_app(
-        Settings(max_request_body_bytes=0, proxy_auth_enabled=False)
-    )
+    app = create_test_app(Settings(max_request_body_bytes=0, proxy_auth_enabled=False))
     client = TestClient(app)
 
     with patch("free_claude_code.api.routes.get_token_count", return_value=1):

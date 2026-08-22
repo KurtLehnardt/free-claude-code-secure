@@ -14,8 +14,7 @@ def _request(headers: dict[str, str]) -> Request:
             "method": "GET",
             "path": "/",
             "headers": [
-                (key.lower().encode(), value.encode())
-                for key, value in headers.items()
+                (key.lower().encode(), value.encode()) for key, value in headers.items()
             ],
         }
     )

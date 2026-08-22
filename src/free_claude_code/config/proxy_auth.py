@@ -16,7 +16,7 @@ from .paths import proxy_auth_token_path
 
 # Publicly-known placeholder shipped in defaults and documentation. It is never a
 # real secret; treat it as "no token configured".
-PUBLIC_DEFAULT_PROXY_AUTH_TOKEN = "freecc"
+PUBLIC_DEFAULT_PROXY_AUTH_TOKEN = "freecc"  # noqa: S105  # public placeholder, not a real secret
 
 # 32 random bytes -> ~43 character URL-safe token.
 _TOKEN_BYTES = 32

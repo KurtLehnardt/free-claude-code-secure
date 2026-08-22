@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "free-claude-code"
-version = "6.1.0"
+version = "6.1.1"
 description = "Local proxy connecting coding agents to OpenAI-compatible AI providers"
 readme = "README.md"
 requires-python = ">=3.14.0"
@@ -12,6 +12,7 @@ dependencies = [
     "fastapi[standard]>=0.141.1",
     "uvicorn>=0.52.1",
     "httpx[socks]>=0.28.1",
+    "httpx2[socks]>=2.7.0,<3",  # starlette 1.x TestClient imports httpx2; required so its deprecation warning doesn't become fatal under filterwarnings=error
     "markdown-it-py>=4.2.0",
     "pydantic>=2.13.4",
     "python-dotenv>=1.2.2",
@@ -169,6 +170,13 @@ known-first-party = ["free_claude_code", "smoke"]
 "src/free_claude_code/messaging/platforms/telegram_io.py" = ["S112"]
 "src/free_claude_code/messaging/transcript/renderer.py" = ["S112"]
 "src/free_claude_code/messaging/voice.py" = ["S112"]
+# flake8-bandit (S) targets shipped application code. Test/smoke/e2e code
+# legitimately uses hardcoded fixtures (S105/S106/S107), subprocess spawns
+# (S603/S607), temp paths (S108), and asserts — so the S ruleset is excluded
+# there to keep security-lint signal focused on src/.
+"tests/**/*.py" = ["S"]
+"smoke/**/*.py" = ["S"]
+"e2e/**/*.py" = ["S"]
 
 [tool.ruff.format]
 quote-style = "double"

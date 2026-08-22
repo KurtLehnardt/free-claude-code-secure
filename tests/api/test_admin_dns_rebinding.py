@@ -32,9 +32,7 @@ def test_admin_allows_local_loopback_request() -> None:
 def test_admin_rejects_forwarded_for_header() -> None:
     client = _loopback_client(create_test_app())
 
-    response = client.get(
-        "/admin/api/config", headers={"X-Forwarded-For": "127.0.0.1"}
-    )
+    response = client.get("/admin/api/config", headers={"X-Forwarded-For": "127.0.0.1"})
 
     assert response.status_code == 403
 
@@ -42,9 +40,7 @@ def test_admin_rejects_forwarded_for_header() -> None:
 def test_admin_rejects_forwarded_header() -> None:
     client = _loopback_client(create_test_app())
 
-    response = client.get(
-        "/admin/api/config", headers={"Forwarded": "for=127.0.0.1"}
-    )
+    response = client.get("/admin/api/config", headers={"Forwarded": "for=127.0.0.1"})
 
     assert response.status_code == 403
 

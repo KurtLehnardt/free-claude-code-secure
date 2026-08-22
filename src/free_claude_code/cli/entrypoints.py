@@ -15,6 +15,8 @@ def serve(argv: Sequence[str] | None = None) -> None:
     from free_claude_code.cli.commands import (
         enforce_exposure_safety,
         log_proxy_auth_token_location,
+    )
+    from free_claude_code.cli.commands import (
         serve as run_server,
     )
     from free_claude_code.config.loader import get_settings

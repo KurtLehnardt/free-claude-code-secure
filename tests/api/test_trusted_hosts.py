@@ -58,7 +58,9 @@ def test_loopback_host_header_is_accepted() -> None:
 def test_create_app_registers_trusted_host_middleware() -> None:
     app = create_test_app(Settings(proxy_auth_enabled=False))
 
-    middleware_classes = {entry.cls.__name__ for entry in app.user_middleware}
+    middleware_classes = {
+        getattr(entry.cls, "__name__", "") for entry in app.user_middleware
+    }
     assert "TrustedHostMiddleware" in middleware_classes
     assert "BodySizeLimitMiddleware" in middleware_classes
     assert create_app is not None

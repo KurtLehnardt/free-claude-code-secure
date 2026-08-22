@@ -66,7 +66,7 @@ def _declared_content_length(scope: Scope) -> int | None:
         if name == b"content-length":
             try:
                 return int(value)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 return None
     return None
 
