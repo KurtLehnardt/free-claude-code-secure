@@ -21,9 +21,9 @@ set -eu
 # `npm install -g <verified-tarball>` step, same as any npm package. That is a
 # property of npm's package model, not a gap in this installer's verification.
 
-FCC_REPO_URL="https://github.com/alishahryar1/free-claude-code"
-# Default pinned Free Claude Code commit (real, verified main HEAD).
-FCC_COMMIT="9372cfa5e2dc48fe1adf9743473f3763b3b08592"
+FCC_REPO_URL="https://github.com/KurtLehnardt/free-claude-code-secure"
+# Default pinned Free Claude Code commit (real, verified secure-fork main HEAD).
+FCC_COMMIT="88b99da8931222268b1e8c5b55acac5d44f66711"
 PYTHON_VERSION="3.14.0"
 MIN_UV_VERSION="0.11.16"
 # uv is pinned to a versioned astral-sh/uv release artifact (not the rolling

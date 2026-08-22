@@ -53,10 +53,10 @@ $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = `
     [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-$FccRepoUrl = "https://github.com/alishahryar1/free-claude-code"
+$FccRepoUrl = "https://github.com/KurtLehnardt/free-claude-code-secure"
 # Default pinned Free Claude Code commit. MUST match install.sh's FCC_COMMIT so
-# both installers pin the exact same source tree (real, verified main HEAD).
-$FccCommit = "9372cfa5e2dc48fe1adf9743473f3763b3b08592"
+# both installers pin the exact same source tree (real, verified secure-fork main HEAD).
+$FccCommit = "88b99da8931222268b1e8c5b55acac5d44f66711"
 # Windows on ARM emulates x64, whose Python package ecosystem has broader wheel support.
 $PythonRequest = "cpython-3.14.0-windows-x86_64-none"
 $MinUvVersion = "0.11.16"
