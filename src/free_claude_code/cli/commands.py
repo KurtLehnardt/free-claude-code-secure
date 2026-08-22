@@ -194,6 +194,12 @@ class ServerSupervisor:
         open_admin_browser: bool,
         restart_generation: int,
     ) -> bool:
+        # Re-run the exposure fail-safe on every bind, not just the CLI
+        # entrypoint's pre-flight: this covers the desktop path (which calls
+        # ServerSupervisor().run() directly) and every admin-triggered
+        # restart, both of which reload settings and re-bind without going
+        # through cli/entrypoints.py.
+        enforce_exposure_safety(settings)
         asgi_app = build_asgi_app(
             settings,
             restart_callback=self._request_runtime_restart,

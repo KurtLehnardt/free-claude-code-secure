@@ -12,7 +12,7 @@ import os
 import secrets
 from pathlib import Path
 
-from .paths import proxy_auth_token_path
+from .paths import ensure_config_dir, proxy_auth_token_path
 
 # Publicly-known placeholder shipped in defaults and documentation. It is never a
 # real secret; treat it as "no token configured".
@@ -43,11 +43,15 @@ def load_or_create_proxy_auth_token(path: Path | None = None) -> str:
     if existing is not None:
         return existing
 
-    parent = token_path.parent
-    parent.mkdir(parents=True, exist_ok=True)
-    if os.name != "nt":
-        with contextlib.suppress(OSError):
-            parent.chmod(0o700)
+    if path is None:
+        # Default ~/.fcc location: create it with owner-only (0700) perms.
+        ensure_config_dir()
+    else:
+        parent = token_path.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            with contextlib.suppress(OSError):
+                parent.chmod(0o700)
 
     token = secrets.token_urlsafe(_TOKEN_BYTES)
     with contextlib.suppress(FileExistsError):

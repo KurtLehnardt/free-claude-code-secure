@@ -18,14 +18,16 @@ from free_claude_code.config.settings import Settings
 
 def _launcher_settings(
     *,
+    host: str = "0.0.0.0",
     port: int = 8082,
     token: str = "freecc",
+    proxy_auth_enabled: bool = False,
     open_admin_browser: bool = True,
 ) -> Settings:
     return Settings(
-        host="0.0.0.0",
+        host=host,
         port=port,
-        proxy_auth_enabled=False,
+        proxy_auth_enabled=proxy_auth_enabled,
         proxy_auth_token=token,
         model="nvidia_nim/test-model",
         open_admin_browser=open_admin_browser,
@@ -184,7 +186,10 @@ def test_serve_respects_admin_browser_setting(open_admin_browser: bool) -> None:
 def test_serve_supervisor_restarts_when_app_requests_restart() -> None:
     from free_claude_code.cli import commands
 
-    settings = _launcher_settings()
+    # Loopback host: this test exercises restart bookkeeping, not exposure
+    # safety, and a real _run_once() now enforces the exposure guard on
+    # every bind (see test_serve_supervisor_rejects_restart_into_unsafe_exposure).
+    settings = _launcher_settings(host="127.0.0.1")
     get_settings = MagicMock(side_effect=[settings, settings])
     servers: list[object] = []
     restart_callbacks: list[Callable[[], None]] = []
@@ -232,7 +237,9 @@ def test_serve_supervisor_restarts_when_app_requests_restart() -> None:
 def test_serve_supervisor_refuses_restart_after_incomplete_shutdown() -> None:
     from free_claude_code.cli import commands
 
-    settings = _launcher_settings()
+    # Loopback host: this test exercises restart bookkeeping, not exposure
+    # safety (see the note in test_serve_supervisor_restarts_when_app_requests_restart).
+    settings = _launcher_settings(host="127.0.0.1")
     get_settings = MagicMock(return_value=settings)
     servers: list[object] = []
     restart_callbacks: list[Callable[[], None]] = []
@@ -267,6 +274,75 @@ def test_serve_supervisor_refuses_restart_after_incomplete_shutdown() -> None:
 
     assert len(servers) == 1
     clear_settings_cache.assert_not_called()
+    kill_all.assert_called_once()
+
+
+def test_run_once_refuses_non_loopback_bind_without_real_auth() -> None:
+    """The exposure guard must fire on every _run_once() bind, not just the
+    fcc-server entrypoint's one-time pre-flight call. This is what closes the
+    desktop path (cli/desktop.py calls ServerSupervisor().run() directly,
+    which loops through _run_once) and every admin-triggered restart."""
+    from free_claude_code.cli import commands
+
+    settings = _launcher_settings(host="0.0.0.0")
+    supervisor = commands.ServerSupervisor(console_logging=False)
+
+    with (
+        patch.object(commands, "build_asgi_app") as build_asgi_app,
+        patch.object(commands.uvicorn, "Server") as uvicorn_server,
+        pytest.raises(SystemExit),
+    ):
+        supervisor._run_once(settings, open_admin_browser=False, restart_generation=0)
+
+    build_asgi_app.assert_not_called()
+    uvicorn_server.assert_not_called()
+
+
+def test_serve_supervisor_rejects_restart_into_unsafe_exposure() -> None:
+    """An admin-triggered restart that flips HOST to non-loopback with auth
+    disabled (or the public default token) must not silently re-bind."""
+    from free_claude_code.cli import commands
+
+    safe_settings = _launcher_settings(host="127.0.0.1")
+    unsafe_settings = _launcher_settings(host="0.0.0.0")
+    get_settings = MagicMock(side_effect=[safe_settings, unsafe_settings])
+    servers: list[object] = []
+    restart_callbacks: list[Callable[[], None]] = []
+
+    def build_asgi_app(_settings: Settings, restart_callback: Callable[[], None]):
+        restart_callbacks.append(restart_callback)
+        return SimpleNamespace(runtime=SimpleNamespace(is_closed=False))
+
+    class FakeServer:
+        def __init__(self, config):
+            self.config = config
+            self.should_exit = False
+            servers.append(self)
+
+        def run(self):
+            restart_callbacks[-1]()
+            assert self.should_exit is True
+            self.config.app.runtime.is_closed = True
+
+    def fake_config(app, **kwargs):
+        return SimpleNamespace(app=app, kwargs=kwargs)
+
+    with (
+        patch.object(commands, "get_settings", get_settings),
+        patch.object(commands.uvicorn, "Config", side_effect=fake_config),
+        patch.object(commands.uvicorn, "Server", side_effect=FakeServer),
+        patch.object(commands, "build_asgi_app", side_effect=build_asgi_app),
+        patch.object(commands, "schedule_open_admin_browser"),
+        patch.object(commands, "clear_settings_cache") as clear_settings_cache,
+        patch.object(commands, "kill_all_best_effort") as kill_all,
+        pytest.raises(SystemExit),
+    ):
+        commands.serve()
+
+    # Only the first (safe) bind ever reached uvicorn; the restart carrying
+    # the unsafe settings was rejected before a second server was built.
+    assert len(servers) == 1
+    clear_settings_cache.assert_called_once()
     kill_all.assert_called_once()
 
 

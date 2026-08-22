@@ -4,6 +4,8 @@ import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from free_claude_code.cli.commands import ServerStatus, ServerSupervisor
 from free_claude_code.cli.desktop import DesktopController
 from free_claude_code.config.settings import Settings
@@ -52,6 +54,27 @@ def test_supervisor_accepts_restart_during_scheduled_startup() -> None:
         restart_generation=1,
     )
     assert supervisor.status is ServerStatus.STOPPED
+
+
+def test_desktop_path_refuses_unsafe_exposure_without_a_dedicated_check() -> None:
+    """cli/desktop.py's launch_desktop() calls ServerSupervisor().run() directly
+    (via DesktopController), with no exposure-safety pre-flight of its own. The
+    guard must therefore fire inside the supervisor's run loop itself so the
+    desktop path is covered the same as the fcc-server entrypoint."""
+    from free_claude_code.cli import commands
+
+    unsafe_settings = _settings()  # host="0.0.0.0" + defaulted public-default token
+    supervisor = ServerSupervisor(console_logging=False)
+
+    with (
+        patch.object(commands, "load_server_settings", return_value=unsafe_settings),
+        patch.object(commands, "build_asgi_app") as build_asgi_app,
+        patch.object(commands, "kill_all_best_effort"),
+        pytest.raises(SystemExit),
+    ):
+        supervisor.run(open_admin_browser=False)
+
+    build_asgi_app.assert_not_called()
 
 
 def test_desktop_controller_owns_server_thread_and_graceful_quit() -> None:

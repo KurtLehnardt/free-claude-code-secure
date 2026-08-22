@@ -1,5 +1,6 @@
 """Local admin UI routes and APIs."""
 
+import asyncio
 import ipaddress
 from collections.abc import Mapping
 from pathlib import Path
@@ -27,6 +28,11 @@ from free_claude_code.core.json_types import JsonObject, JsonValue
 
 from .dependencies import get_services
 from .ports import ApiServices
+from .web_tools.egress import (
+    WebFetchEgressPolicy,
+    WebFetchEgressViolation,
+    enforce_web_fetch_egress,
+)
 
 router = APIRouter()
 
@@ -38,6 +44,23 @@ LOCAL_PROVIDER_PATHS = {
 }
 _LOCAL_PROVIDER_CHECK_FAILURE_MESSAGE = (
     "Could not connect. Verify the URL and that the local provider is running."
+)
+_LOCAL_PROVIDER_EGRESS_BLOCKED_MESSAGE = (
+    "This URL is not allowed for local-provider probing "
+    "(only the operator's own localhost server is permitted)."
+)
+# The local-provider reachability probe is config-driven (LM_STUDIO_BASE_URL /
+# LLAMACPP_BASE_URL / OLLAMA_BASE_URL), not request-driven, but a corrupted or
+# malicious config value could still point it at an internal/cloud-metadata
+# address. Route it through the same SSRF guard as web_fetch. Unlike the
+# general web_fetch policy, loopback stays allowed here (allow_loopback_targets)
+# because the probe's whole purpose is reaching an operator's own localhost
+# LM Studio / llama.cpp / Ollama server; every other private/link-local/CGNAT
+# address (including 169.254.169.254 cloud metadata) is still rejected.
+_LOCAL_PROVIDER_PROBE_EGRESS = WebFetchEgressPolicy(
+    allow_private_network_targets=False,
+    allowed_schemes=frozenset({"http", "https"}),
+    allow_loopback_targets=True,
 )
 
 
@@ -323,6 +346,23 @@ async def _check_local_provider(
         }
 
     url = f"{clean_url}{path}"
+    try:
+        await asyncio.to_thread(
+            enforce_web_fetch_egress, url, _LOCAL_PROVIDER_PROBE_EGRESS
+        )
+    except WebFetchEgressViolation:
+        logger.warning(
+            "Admin local provider check rejected by egress guard: provider={}",
+            provider_id,
+        )
+        return {
+            "provider_id": provider_id,
+            "status": "blocked",
+            "label": "Blocked",
+            "base_url": base_url,
+            "message": _LOCAL_PROVIDER_EGRESS_BLOCKED_MESSAGE,
+        }
+
     try:
         async with httpx.AsyncClient(timeout=1.5) as client:
             response = await client.get(url)

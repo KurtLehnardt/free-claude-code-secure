@@ -26,6 +26,15 @@ class BodySizeLimitMiddleware:
     length bodies, bytes are counted as chunks arrive and the first chunk that crosses
     the cap raises :class:`RequestBodyTooLarge` from ``receive`` inside the app, so
     nothing beyond the cap is ever accumulated. ``max_body_bytes <= 0`` disables it.
+
+    ``RequestBodyTooLarge`` is normally caught by Starlette's ``ExceptionMiddleware``
+    and dispatched to the app's registered handler. But
+    ``InferenceRequestLifetimeMiddleware`` sits between this middleware and
+    ``ExceptionMiddleware`` on ``/v1/messages``/``/v1/responses`` and re-raises
+    whatever its own body-receiving task raises, so the exception can escape past
+    ``ExceptionMiddleware`` entirely and surface as a generic 500. Guard against that
+    here too: if ``RequestBodyTooLarge`` propagates back out of the inner app and no
+    response has started yet, emit the same 413 directly.
     """
 
     def __init__(self, app: ASGIApp, *, max_body_bytes: int) -> None:
@@ -55,7 +64,20 @@ class BodySizeLimitMiddleware:
                         raise RequestBodyTooLarge()
             return message
 
-        await self.app(scope, guarded_receive, send)
+        response_started = False
+
+        async def tracking_send(message: Message) -> None:
+            nonlocal response_started
+            if message.get("type") == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, guarded_receive, tracking_send)
+        except RequestBodyTooLarge:
+            if response_started:
+                raise
+            await _send_too_large(send)
 
 
 def _declared_content_length(scope: Scope) -> int | None:

@@ -8,7 +8,8 @@
 # Verified against the real repo (src/free_claude_code):
 #   - pyproject.toml: requires-python = ">=3.14.0", build-backend = hatchling,
 #     [project.scripts] fcc-server = "free_claude_code.cli.entrypoints:serve"
-#   - settings.py: HOST defaults to 0.0.0.0, PORT defaults to 8082
+#   - settings.py: HOST defaults to 127.0.0.1, PORT 8082 (this image overrides
+#     HOST=0.0.0.0 for container networking — see the CMD note at the bottom)
 #   - api/routes.py: unauthenticated GET /health -> {"status": "healthy"}
 #   - config/paths.py: ALL writable state (log file, messaging session state,
 #     OpenAI/Codex credential cache, lock files) lives under
@@ -139,7 +140,12 @@ EXPOSE 8082
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request as u; u.urlopen('http://127.0.0.1:8082/health', timeout=2).read()" || exit 1
 
-# Matches the [project.scripts] console entry point; binds 0.0.0.0:8082 by
-# default per settings.py (HOST/PORT env vars above make that explicit
-# rather than relying on the library default).
+# Matches the [project.scripts] console entry point. settings.py now defaults
+# HOST to 127.0.0.1; this image deliberately overrides HOST=0.0.0.0 (ENV above)
+# because a container must bind all interfaces for its published port to be
+# reachable. That stays safe here because auth is on by default (a per-install
+# token is auto-generated under ~/.fcc) and docker-compose.yml publishes
+# loopback-only (127.0.0.1:8082). The startup exposure fail-safe allows this
+# non-loopback bind precisely because auth is enabled with a non-default token;
+# it would refuse to start if auth were disabled or left at the public default.
 CMD ["fcc-server"]

@@ -38,7 +38,7 @@ from .validation_log import summarize_request_validation_body
 # httpx/Starlette TestClient sentinel Host. It is not internet-routable, so allowing
 # it costs nothing against DNS rebinding while keeping the API testable.
 _TESTCLIENT_HOST = "testserver"
-_LOOPBACK_HOST_NAMES = ("localhost", "127.0.0.1", "::1")
+_LOOPBACK_HOST_NAMES = ("localhost", "127.0.0.1", "::1", "[::1]")
 _WILDCARD_BINDS = frozenset({"", "0.0.0.0", "::"})  # noqa: S104  # sentinels for detecting a wildcard bind, not an actual socket bind
 
 

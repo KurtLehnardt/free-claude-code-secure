@@ -48,15 +48,42 @@ CVSS-ish judgment. Status reflects the remediation pass tracked in this repo's h
 - **`install.ps1`** brought to full parity with `install.sh` (checksum manifest gating for all Windows
   vendor scripts + pinned uv artifact + OpenCode + RTK, `main.zip` → pinned commit, `-AllowUnpinned`
   / `-RefreshChecksums`, TLS 1.2 enforcement). Windows smoke test still required (unrun — no pwsh).
+- **CI is now GREEN** (was red on stale tests). `starlette>=1.6.0` needed `httpx2` (starlette 1.x
+  TestClient) to avoid a fatal deprecation under `filterwarnings=error`; added it. Installer/CI tests
+  rewritten for hardened behavior + 5 new security tests. Verified on Python 3.14 via uv:
+  `ruff format --check`, `ruff check`, `ty`, full `pytest` (3651 passed), and e2e (9 passed) all green.
+  (`deps-audit`/pip-audit couldn't bootstrap locally — ensurepip SIGABRT — but resolved versions are
+  the patched CVE floors; runs on GitHub CI.)
 
-## Open / required (not yet done)
-- **CI is RED — stale installer/CI tests must be updated.** `tests/scripts/test_installers.py`
-  (~100 tests) and `tests/scripts/test_ci_scripts.py` still assert pre-hardening behavior
-  (`main.zip`, unpinned `npm install -g cline`, old `CHECK_ORDER` without `deps-audit`), so `pytest`
-  fails at HEAD. These were not updated alongside the installer/CI hardening and are the blocker to
-  green CI. Requires updating the suite to the hardened behavior (and running `pytest`, which needs
-  `uv`/Python 3.14, unavailable in the authoring environment).
-- Digest-pin container base images before production.
-- Run `uv lock`; run `./scripts/ci.sh` + full pytest; enable branch-protection required checks for
-  `deps-audit` and `secrets-scan`.
-- Tier-2 scanners (hadolint/trivy/actionlint) — recommended, not yet wired.
+## Second-pass full review (opus) — findings & remediation
+0 Critical, 0 High, 1 Medium, 3 Low, 5 Info. Core remediations re-traced end-to-end and hold.
+- **Medium #1 (FIXED):** exposure fail-safe was start-time-only; bypassable via the `fcc-desktop`
+  path and admin-triggered in-process restarts. Now enforced inside `ServerSupervisor._run_once`, so
+  every bind/rebind runs the guard. New tests cover restart-into-unsafe and the desktop path.
+- **Low #2 (FIXED):** over-cap chunked body returned 500; `BodySizeLimitMiddleware` now emits the
+  413 JSON directly (with response-started tracking to avoid double-send). New parametrized test.
+- **Low #3 (FIXED):** admin local-provider probe now routed through the egress guard (loopback-only
+  allowance so local model servers stay probeable; metadata/LAN blocked). New tests.
+- **Low #4 (FIXED):** SSRF guard's IPv4-embedding detection broadened to custom-prefix NAT64 + Teredo.
+- **Info #5 (FIXED):** dead `ensure_config_dir` wired into token-path creation (0700 dir, DRY).
+- **Info #8 (FIXED):** stale Dockerfile HOST comments corrected (settings default is now 127.0.0.1;
+  the image intentionally sets HOST=0.0.0.0 for container networking, safe via auth-on + loopback
+  publish + the exposure fail-safe).
+- **Info #9 (FIXED):** added bracketed `[::1]` to the TrustedHost loopback allowlist.
+- **Info #6/#7 (ACCEPTED, documented):** the managed coding-agent subprocess runs with
+  `--dangerously-skip-permissions` (inherent to running autonomous coding agents) — the messaging
+  inbound allowlists (Telegram + Discord, both fail-closed) are the RCE barrier. `"testserver"` in
+  the Host allowlist is not internet-routable.
+
+## Open / follow-ups (lower priority)
+- **Provider-test SSRF (new, Low):** `services.admin.test_provider` (`runtime/application.py:230`)
+  probes the configured provider base_url via the provider client abstraction (not a raw call), so it
+  wasn't covered by the Low #3 fix. Same class (operator-config, loopback-admin-gated). Guarding it
+  means threading egress validation into the provider client layer — deferred.
+- **Admin apply-time persistence:** an admin can still *persist* an unsafe HOST/auth config; it can no
+  longer take effect on any bind (Medium #1 fix), but rejecting it at apply-time is a further hardening.
+- **Admin probe not DNS-pinned:** validated then fetched via httpx (narrow TOCTOU; operator-config,
+  status-only) — accepted vs the Low severity.
+- Digest-pin container base images before production; enable branch-protection required checks for
+  `deps-audit`/`secrets-scan`; Tier-2 scanners (hadolint/trivy/actionlint); Windows `install.ps1`
+  smoke test.
