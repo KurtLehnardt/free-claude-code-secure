@@ -44,9 +44,18 @@ CVSS-ish judgment. Status reflects the remediation pass tracked in this repo's h
   guarded), tiktoken BPE (openaipublic.blob…, cache-warmed in Docker), optional voice (HuggingFace,
   NVIDIA riva).
 
-## Open / recommended (not yet done)
-- **`install.ps1` full rewrite** to match `install.sh` (checksum manifest gating for vendor scripts,
-  `main.zip` → pinned commit, pinned uv). Largest residual risk.
+## Remediated after initial pass
+- **`install.ps1`** brought to full parity with `install.sh` (checksum manifest gating for all Windows
+  vendor scripts + pinned uv artifact + OpenCode + RTK, `main.zip` → pinned commit, `-AllowUnpinned`
+  / `-RefreshChecksums`, TLS 1.2 enforcement). Windows smoke test still required (unrun — no pwsh).
+
+## Open / required (not yet done)
+- **CI is RED — stale installer/CI tests must be updated.** `tests/scripts/test_installers.py`
+  (~100 tests) and `tests/scripts/test_ci_scripts.py` still assert pre-hardening behavior
+  (`main.zip`, unpinned `npm install -g cline`, old `CHECK_ORDER` without `deps-audit`), so `pytest`
+  fails at HEAD. These were not updated alongside the installer/CI hardening and are the blocker to
+  green CI. Requires updating the suite to the hardened behavior (and running `pytest`, which needs
+  `uv`/Python 3.14, unavailable in the authoring environment).
 - Digest-pin container base images before production.
 - Run `uv lock`; run `./scripts/ci.sh` + full pytest; enable branch-protection required checks for
   `deps-audit` and `secrets-scan`.

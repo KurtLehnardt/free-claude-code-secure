@@ -1,25 +1,40 @@
-# npm-distributed agents (Cline, DeepSeek Harness) are pinned to an exact
-# version (never a floating "latest") and are fetched via `npm pack` into an
-# isolated temp dir -- a plain artifact download that runs no lifecycle
-# scripts -- so the tarball can be sha256-verified against the same
-# scripts/install.checksums manifest scripts/install.sh uses, before it is
-# installed. Unlike install.sh, this script has no --allow-unpinned /
-# --refresh-checksums escape hatch, so an unpinned (REPLACE_ME/missing) hash
-# WARNS and proceeds rather than failing closed -- failing closed here with
-# no way to opt out would make these agents uninstallable on Windows by
-# default. Run `scripts/install.sh --refresh-checksums` on any platform (npm
-# packages are not platform-specific) to compute a real hash, review it
-# against a trusted source, and paste it into install.checksums for a hard
-# fail-closed guarantee on Windows too. Residual trust: this verifies the
-# package ARTIFACT; it does not sandbox the package's own preinstall/
-# postinstall scripts, which still run with your user's privileges during
-# the final `npm install -g`, same as any npm package.
+# Supply-chain-hardened Windows installer for Free Claude Code -- the PowerShell
+# counterpart of scripts/install.sh, sharing the scripts/install.checksums
+# manifest.
+#
+# Every remotely downloaded installer script or release artifact is verified
+# against a pinned sha256 in scripts/install.checksums BEFORE it is executed or
+# extracted: the vendor *.ps1 installers (Claude, Codex, Pi, Hermes, Grok), the
+# pinned uv release archive, the OpenCode Windows release archive, RTK, and the
+# npm-distributed agents (Cline, DeepSeek Harness). The installer is FAIL-CLOSED:
+# a component whose expected checksum is missing or the literal token REPLACE_ME
+# is refused unless -AllowUnpinned is passed. Free Claude Code itself is installed
+# from a git checkout pinned to an exact commit (matching install.sh's
+# FCC_COMMIT), not an unversioned archive.
+#
+# npm-distributed agents are pinned to an exact version (never a floating
+# "latest") and are fetched via `npm pack` into an isolated temp dir -- a plain
+# artifact download that runs no lifecycle scripts -- so the downloaded tarball
+# can be sha256-verified against the same manifest and FAIL-CLOSED policy as every
+# other component before anything is installed. Residual trust: this verifies the
+# package ARTIFACT; it does not and cannot sandbox the package's own preinstall/
+# postinstall scripts, which still run with your user's privileges during the
+# final `npm install -g <verified-tarball>` step, same as any npm package.
+#
+# -RefreshChecksums downloads each installer/artifact, prints "id=<sha256>" lines
+# to stdout, and exits -- it executes nothing and never edits the manifest. Use it
+# (or scripts/install.sh --refresh-checksums) to compute a hash, review it against
+# a trusted source, and paste it into install.checksums.
 param(
     [switch] $VoiceNim,
     [switch] $VoiceLocal,
     [switch] $VoiceAll,
     [string] $TorchBackend = "",
     [switch] $Rtk,
+    [string] $FccRef = "",
+    [string] $Checksums = "",
+    [switch] $AllowUnpinned,
+    [switch] $RefreshChecksums,
     [switch] $DryRun,
     [switch] $Help,
     [Parameter(ValueFromRemainingArguments = $true)]
@@ -30,10 +45,29 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-$RepoArchiveUrl = "https://github.com/Alishahryar1/free-claude-code/archive/refs/heads/main.zip"
+# Enforce TLS 1.2+ before any network call. On Windows PowerShell 5.1 over older
+# .NET, Invoke-RestMethod can otherwise negotiate down to TLS 1.0/1.1, weakening
+# the transport-integrity backstop that protects downloads (most important on the
+# -AllowUnpinned path, where the sha256 gate is relaxed). -bor so we ADD TLS 1.2
+# without clobbering TLS 1.3 where the platform already enables it.
+[Net.ServicePointManager]::SecurityProtocol = `
+    [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+$FccRepoUrl = "https://github.com/alishahryar1/free-claude-code"
+# Default pinned Free Claude Code commit. MUST match install.sh's FCC_COMMIT so
+# both installers pin the exact same source tree (real, verified main HEAD).
+$FccCommit = "9372cfa5e2dc48fe1adf9743473f3763b3b08592"
 # Windows on ARM emulates x64, whose Python package ecosystem has broader wheel support.
 $PythonRequest = "cpython-3.14.0-windows-x86_64-none"
 $MinUvVersion = "0.11.16"
+# uv is pinned to a versioned astral-sh/uv release artifact (not the rolling
+# astral.sh/uv/install.ps1 script). Windows on ARM emulates x64, so -- like the
+# pinned Python request and RTK asset above/below -- uv is pinned to the x86_64
+# msvc release .zip. Its sha256 lives in the manifest.
+$UvVersion = "0.11.16"
+$UvReleaseBaseUrl = "https://github.com/astral-sh/uv/releases/download/$UvVersion"
+$UvWindowsTarget = "x86_64-pc-windows-msvc"
+$UvWindowsAssetName = "uv-$UvWindowsTarget.zip"
 $ClaudeInstallUrl = "https://claude.ai/install.ps1"
 $CodexInstallUrl = "https://chatgpt.com/codex/install.ps1"
 $PiInstallUrl = "https://pi.dev/install.ps1"
@@ -54,9 +88,11 @@ $MinGrokVersion = "1.0.5"
 $MinMuseVersion = "0.2.1"
 $RtkVersion = "0.44.2"
 $RtkReleaseBaseUrl = "https://github.com/rtk-ai/rtk/releases/download/v$RtkVersion"
-$RtkWindowsAssetName = "rtk-x86_64-pc-windows-msvc.zip"
-$RtkWindowsAssetSha256 = "3a1e114edce9080f8a10663e9c87488363a82f14a5ca8aab2ad416817f89d47c"
-$UvInstallUrl = "https://astral.sh/uv/install.ps1"
+$RtkWindowsTarget = "x86_64-pc-windows-msvc"
+$RtkWindowsAssetName = "rtk-$RtkWindowsTarget.zip"
+# Resolved once at startup; see Resolve-ChecksumsFile / the main flow below.
+$script:ChecksumsFile = ""
+$script:FccRef = ""
 $script:InstallClaudeCode = $true
 $script:InstallCodex = $true
 $script:InstallPi = $true
@@ -91,9 +127,12 @@ function Show-Usage {
 Usage: install.ps1 [options]
 
 Installs or updates Free Claude Code and lets you choose which coding agents to install or verify.
-npm-distributed agents (Cline, DeepSeek Harness) are pinned to an exact version and verified against
-scripts/install.checksums (via `npm pack` + sha256) before install when a hash is pinned there; see
-the comment at the top of this script for how that manifest is populated.
+Every downloaded installer script and release artifact -- the vendor *.ps1 installers, the pinned uv
+release, the OpenCode Windows release, RTK, and npm-distributed agents (Cline, DeepSeek Harness), which
+are pinned to an exact version and packed via `npm pack` for verification before install -- is
+checksum-verified against a pinned manifest (scripts/install.checksums) before it runs. Free Claude
+Code itself is installed from a git checkout pinned to an exact commit. Unpinned components are refused
+unless you explicitly pass -AllowUnpinned.
 
 Options:
   -VoiceNim              Install NVIDIA NIM voice transcription support.
@@ -101,6 +140,11 @@ Options:
   -VoiceAll              Install all voice transcription backends.
   -TorchBackend VALUE    Use a uv PyTorch backend, such as cu130. Requires local voice.
   -Rtk                   Install and configure RTK for the selected coding agents.
+  -FccRef SHA            Install Free Claude Code at this git commit (default: pinned commit).
+  -Checksums PATH        Path to the checksum manifest (default: install.checksums beside this script).
+  -AllowUnpinned         Execute components without a pinned checksum. INSECURE; prints a warning.
+  -RefreshChecksums      Download each installer/artifact, print id=sha256 lines, and exit.
+                         Does NOT execute anything and does NOT modify the manifest.
   -DryRun                Print commands without running them.
   -Help                  Show this help text.
 "@
@@ -251,16 +295,47 @@ function Get-ApplicationCommand {
     return $commands[0]
 }
 
-# Reads scripts/install.checksums (the same manifest install.sh uses) beside
-# this script and returns the pinned sha256 for $ComponentId, or $null if the
-# file or the row is missing. Format: "<component-id>=<sha256>"; blank lines
-# and lines starting with '#' are ignored, matching install.sh's parser.
+# Resolve the checksum manifest path once (CLI -Checksums > FCC_CHECKSUMS_FILE env
+# var > install.checksums beside this script), mirroring install.sh's
+# resolve_checksums_file. Stored in $script:ChecksumsFile for every later lookup.
+function Resolve-ChecksumsFile {
+    if (-not [string]::IsNullOrWhiteSpace($Checksums)) {
+        $script:ChecksumsFile = $Checksums
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($env:FCC_CHECKSUMS_FILE)) {
+        $script:ChecksumsFile = $env:FCC_CHECKSUMS_FILE
+    }
+    else {
+        $scriptDirectory = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+        $script:ChecksumsFile = Join-Path $scriptDirectory "install.checksums"
+    }
+}
+
+# Compute the lowercase-hex sha256 of a file, matching the format stored in the
+# manifest and printed by install.sh's compute_sha256.
+function Get-FileSha256 {
+    param([string] $Path)
+
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        return [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        $stream.Dispose()
+        $sha256.Dispose()
+    }
+}
+
+# Reads scripts/install.checksums (the same manifest install.sh uses; path from
+# Resolve-ChecksumsFile) and returns the pinned sha256 for $ComponentId, or $null
+# if the file or the row is missing. Format: "<component-id>=<sha256>"; blank
+# lines and lines starting with '#' are ignored, matching install.sh's parser.
 function Get-PinnedChecksum {
     param([string] $ComponentId)
 
-    $scriptDirectory = if ($PSScriptRoot) { $PSScriptRoot } else { Get-Location }
-    $manifestPath = Join-Path $scriptDirectory "install.checksums"
-    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    $manifestPath = $script:ChecksumsFile
+    if ([string]::IsNullOrWhiteSpace($manifestPath) -or (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf))) {
         return $null
     }
 
@@ -273,7 +348,9 @@ function Get-PinnedChecksum {
         if ($separatorIndex -lt 0) {
             continue
         }
-        $key = $trimmedLine.Substring(0, $separatorIndex).Trim()
+        # Strip ALL whitespace from key and value (not just the ends) to match
+        # install.sh's `tr -d '[:space:]'`, so both parsers agree on every row.
+        $key = $trimmedLine.Substring(0, $separatorIndex) -replace '\s', ''
         if ($key -ne $ComponentId) {
             continue
         }
@@ -282,28 +359,81 @@ function Get-PinnedChecksum {
         if ($commentIndex -ge 0) {
             $value = $value.Substring(0, $commentIndex)
         }
-        return $value.Trim()
+        return ($value -replace '\s', '')
     }
 
     return $null
+}
+
+# Loud multi-line stderr banner shown once when -AllowUnpinned is set, mirroring
+# install.sh's print_unpinned_banner.
+function Write-UnpinnedBanner {
+    $lines = @(
+        '********************************************************************************',
+        '*                   SECURITY WARNING: -AllowUnpinned is set                  *',
+        '*                                                                            *',
+        '* Checksum verification is DISABLED for every component whose sha256 is      *',
+        '* missing or REPLACE_ME in the manifest. Downloaded installer scripts and    *',
+        '* release artifacts will be EXECUTED WITHOUT integrity verification.         *',
+        '* This exposes you to supply-chain tampering and man-in-the-middle attacks.  *',
+        '* Only continue if you fully trust your network path and every upstream      *',
+        '* vendor. Prefer pinning real hashes via -RefreshChecksums instead.          *',
+        '********************************************************************************'
+    )
+    foreach ($line in $lines) {
+        [Console]::Error.WriteLine($line)
+    }
+}
+
+# Verify an already-downloaded file for a component against the pinned manifest,
+# mirroring install.sh's resolve_component_checksum + verify_downloaded_file:
+#   * a real pinned hash    -> verify; a mismatch is fatal (even with
+#                              -AllowUnpinned -- the escape hatch never bypasses a
+#                              real pin).
+#   * REPLACE_ME / missing  -> FAIL CLOSED, refusing to run unverified code,
+#                              UNLESS -AllowUnpinned, which warns (printing the
+#                              observed sha256) and proceeds.
+# Throws on any verification failure; returns normally when the caller may
+# proceed to execute/extract the file.
+function Confirm-PinnedFile {
+    param(
+        [string] $Path,
+        [string] $Label,
+        [string] $ComponentId
+    )
+
+    $actualHash = Get-FileSha256 -Path $Path
+    $expectedHash = Get-PinnedChecksum -ComponentId $ComponentId
+
+    if ($expectedHash -and ($expectedHash -ne "REPLACE_ME")) {
+        if ($actualHash -ne $expectedHash) {
+            throw "Checksum verification failed for $Label (component id: $ComponentId): expected $expectedHash, computed $actualHash. Refusing to continue."
+        }
+        Write-Host "Verified $Label against pinned sha256 (component id: $ComponentId)."
+        return
+    }
+
+    if ($AllowUnpinned) {
+        Write-Warning "$Label executed without verification; computed sha256=$actualHash (component id: $ComponentId). -AllowUnpinned is set."
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $script:ChecksumsFile -PathType Leaf)) {
+        throw "Checksum manifest not found at $($script:ChecksumsFile). This hardened installer refuses to run downloaded code without it. Run from a repository checkout, set FCC_CHECKSUMS_FILE, pass -Checksums <path>, or re-run with -AllowUnpinned (NOT recommended)."
+    }
+
+    throw "No pinned sha256 for component `"$ComponentId`" ($Label) in $($script:ChecksumsFile) (value is missing or REPLACE_ME). Refusing to run unverified code. Run 'install.ps1 -RefreshChecksums' (or scripts/install.sh --refresh-checksums) to compute it, review it against a trusted source, paste the id=hash line into the manifest, then rerun; or re-run with -AllowUnpinned to bypass verification (NOT recommended)."
 }
 
 # Fetches the exact published npm tarball for $PackageSpec via `npm pack`
 # into an isolated temp dir. `npm pack` on a registry spec is a plain
 # artifact download -- it does not run the target package's lifecycle
 # scripts -- so the downloaded bytes can be sha256-verified against
-# scripts/install.checksums (via Get-PinnedChecksum) before anything is
-# installed. Only after that check does it install globally FROM the
-# verified local tarball, so the bytes that get installed are exactly the
-# bytes that were hashed.
-#
-# Unlike install.sh's npm_pack_verify_and_install_global, this does not fail
-# closed when the manifest has no pinned hash yet (REPLACE_ME/missing): this
-# script has no --allow-unpinned/--refresh-checksums flags to opt back in,
-# so failing closed by default would make Cline/DeepSeek Harness
-# uninstallable on Windows out of the box. It warns instead and proceeds.
-# Pin a real hash (see the header comment at the top of this file) to get a
-# hard fail-closed guarantee on Windows too.
+# scripts/install.checksums (via Confirm-PinnedFile) before anything is
+# installed, fail-closed by the same -AllowUnpinned policy as every other
+# component. Only after that check does it install globally FROM the verified
+# local tarball, so the bytes that get installed are exactly the bytes that
+# were hashed (no second, unverified registry round-trip).
 #
 # Residual trust: this verifies the package ARTIFACT. It does not sandbox
 # the npm package's own preinstall/postinstall scripts, which still run
@@ -318,7 +448,7 @@ function Install-NpmPackageVerified {
 
     if ($DryRun) {
         Write-Host "+ npm pack $PackageSpec --pack-destination <temporary-dir> --ignore-scripts"
-        Write-Host "+ verify sha256 of the packed $Label tarball against install.checksums (component: $ComponentId)"
+        Write-Host "+ verify sha256 of the packed $Label tarball against $($script:ChecksumsFile) (component: $ComponentId)"
         Write-Host "+ npm install -g --no-fund --no-audit=false <verified-tarball>"
         return
     }
@@ -340,26 +470,7 @@ function Install-NpmPackageVerified {
         }
         $tarballPath = $tarballs[0].FullName
 
-        $sha256 = [Security.Cryptography.SHA256]::Create()
-        $tarballStream = [IO.File]::OpenRead($tarballPath)
-        try {
-            $actualHash = [BitConverter]::ToString($sha256.ComputeHash($tarballStream)).Replace("-", "").ToLowerInvariant()
-        }
-        finally {
-            $tarballStream.Dispose()
-            $sha256.Dispose()
-        }
-
-        $expectedHash = Get-PinnedChecksum -ComponentId $ComponentId
-        if ($expectedHash -and ($expectedHash -ne "REPLACE_ME")) {
-            if ($actualHash -ne $expectedHash) {
-                throw "Checksum verification failed for $Label (component id: $ComponentId): expected $expectedHash, computed $actualHash. Refusing to continue."
-            }
-            Write-Host "Verified $Label against pinned sha256 (component id: $ComponentId)."
-        }
-        else {
-            Write-Warning "No pinned sha256 for component `"$ComponentId`" ($Label) in install.checksums; installing with sha256=$actualHash unverified. See scripts/install.sh --refresh-checksums to pin one."
-        }
+        Confirm-PinnedFile -Path $tarballPath -Label $Label -ComponentId $ComponentId
 
         Invoke-NativeCommand -FilePath $npm.Source -Arguments @("install", "-g", "--no-fund", "--no-audit=false", $tarballPath)
     }
@@ -465,12 +576,14 @@ function Invoke-DownloadedPowerShellInstaller {
     param(
         [string] $Url,
         [string] $Name,
+        [string] $ComponentId,
         [switch] $NonInteractive,
         [string[]] $ScriptArguments = @()
     )
 
     if ($DryRun) {
         Write-Host "+ irm $Url -OutFile <temporary-script>"
+        Write-Host "+ verify sha256 of <temporary-script> against $($script:ChecksumsFile) (component: $ComponentId)"
         $prefix = if ($NonInteractive) { "CODEX_NON_INTERACTIVE=1 " } else { "" }
         $suffix = if ($ScriptArguments.Count -gt 0) {
             " " + (($ScriptArguments | ForEach-Object { Format-Argument $_ }) -join " ")
@@ -489,6 +602,10 @@ function Invoke-DownloadedPowerShellInstaller {
         if ((-not (Test-Path -LiteralPath $temporaryScript)) -or ((Get-Item -LiteralPath $temporaryScript).Length -eq 0)) {
             throw "The downloaded $Name installer was empty."
         }
+
+        # Fail-closed integrity gate: verify the downloaded bytes against the
+        # pinned manifest BEFORE parsing or executing them.
+        Confirm-PinnedFile -Path $temporaryScript -Label "$Name installer" -ComponentId $ComponentId
 
         $tokens = $null
         $parseErrors = $null
@@ -585,9 +702,10 @@ function Confirm-PiApplication {
 
 function Install-Rtk {
     $archiveUrl = "$RtkReleaseBaseUrl/$RtkWindowsAssetName"
+    $componentId = "rtk-$RtkVersion-$RtkWindowsTarget"
     if ($DryRun) {
         Write-Host "+ irm $archiveUrl -OutFile <temporary-archive>"
-        Write-Host "+ verify pinned SHA-256 for $RtkWindowsAssetName"
+        Write-Host "+ verify sha256 for $RtkWindowsAssetName against $($script:ChecksumsFile) (component: $componentId)"
         Write-Host "+ extract and install rtk.exe to ~/.local/bin"
         return
     }
@@ -604,18 +722,8 @@ function Install-Rtk {
             throw "The RTK release archive was empty."
         }
 
-        $sha256 = [Security.Cryptography.SHA256]::Create()
-        $archiveStream = [IO.File]::OpenRead($archivePath)
-        try {
-            $actualHash = [BitConverter]::ToString($sha256.ComputeHash($archiveStream)).Replace("-", "").ToLowerInvariant()
-        }
-        finally {
-            $archiveStream.Dispose()
-            $sha256.Dispose()
-        }
-        if ($actualHash -ne $RtkWindowsAssetSha256) {
-            throw "RTK checksum verification failed for $RtkWindowsAssetName."
-        }
+        # Fail-closed integrity gate before extracting the archive.
+        Confirm-PinnedFile -Path $archivePath -Label "RTK $RtkVersion archive ($RtkWindowsAssetName)" -ComponentId $componentId
 
         Expand-Archive -LiteralPath $archivePath -DestinationPath $extractPath
         $extractedExecutable = Join-Path $extractPath "rtk.exe"
@@ -741,7 +849,7 @@ function Ensure-ClaudeCode {
         Write-Host "Claude Code already found on PATH; verifying it."
     }
     else {
-        Invoke-DownloadedPowerShellInstaller -Url $ClaudeInstallUrl -Name "Claude Code"
+        Invoke-DownloadedPowerShellInstaller -Url $ClaudeInstallUrl -Name "Claude Code" -ComponentId "claude-installer-ps1"
         Add-KnownBinDirectories
     }
 
@@ -753,7 +861,7 @@ function Ensure-Codex {
         Write-Host "Codex already found on PATH; verifying it."
     }
     else {
-        Invoke-DownloadedPowerShellInstaller -Url $CodexInstallUrl -Name "Codex" -NonInteractive
+        Invoke-DownloadedPowerShellInstaller -Url $CodexInstallUrl -Name "Codex" -ComponentId "codex-installer-ps1" -NonInteractive
         Add-KnownBinDirectories
     }
 
@@ -771,7 +879,7 @@ function Ensure-Pi {
         if ($existingPi) {
             Write-Host "The existing 'pi' command at '$($existingPi.Source)' is not Pi Coding Agent; installing Pi."
         }
-        Invoke-DownloadedPowerShellInstaller -Url $PiInstallUrl -Name "Pi"
+        Invoke-DownloadedPowerShellInstaller -Url $PiInstallUrl -Name "Pi" -ComponentId "pi-installer-ps1"
         Add-NpmBinDirectories
 
         if (-not $DryRun) {
@@ -873,10 +981,12 @@ function Get-OpenCodeWindowsAssetName {
 
 function Install-OpenCode {
     $assetName = Get-OpenCodeWindowsAssetName
+    $componentId = ($assetName -replace '\.zip$', '')
     $archiveUrl = "$OpenCodeReleaseBaseUrl/$assetName"
     $installDirectory = Join-Path $env:USERPROFILE ".opencode\bin"
     if ($DryRun) {
         Write-Host "+ irm $archiveUrl -OutFile <temporary-archive>"
+        Write-Host "+ verify sha256 for $assetName against $($script:ChecksumsFile) (component: $componentId)"
         Write-Host "+ extract and install opencode.exe to $(Format-Argument $installDirectory)"
         return
     }
@@ -892,6 +1002,9 @@ function Install-OpenCode {
         if ((-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) -or ((Get-Item -LiteralPath $archivePath).Length -eq 0)) {
             throw "The OpenCode release archive was empty."
         }
+
+        # Fail-closed integrity gate before extracting the archive.
+        Confirm-PinnedFile -Path $archivePath -Label "OpenCode Windows release ($assetName)" -ComponentId $componentId
 
         Expand-Archive -LiteralPath $archivePath -DestinationPath $extractPath
         $executables = @(Get-ChildItem -LiteralPath $extractPath -Recurse -File -Filter "opencode.exe")
@@ -1057,6 +1170,7 @@ function Install-Hermes {
     Invoke-DownloadedPowerShellInstaller `
         -Url $HermesInstallUrl `
         -Name "Hermes Agent" `
+        -ComponentId "hermes-installer-ps1" `
         -ScriptArguments @("-NonInteractive", "-SkipSetup")
     Add-KnownBinDirectories
 }
@@ -1117,7 +1231,7 @@ function Confirm-GrokApplication {
 }
 
 function Install-Grok {
-    Invoke-DownloadedPowerShellInstaller -Url $GrokInstallUrl -Name "Grok Build"
+    Invoke-DownloadedPowerShellInstaller -Url $GrokInstallUrl -Name "Grok Build" -ComponentId "grok-installer-ps1"
     Add-KnownBinDirectories
 }
 
@@ -1388,15 +1502,74 @@ function Confirm-Uv {
     Write-Host "Verified uv $version."
 }
 
+# Download the pinned uv release .zip, verify it against the manifest, and
+# extract uv.exe (and uvx.exe when present) into ~/.local/bin. Replaces the
+# rolling astral.sh/uv/install.ps1 script, mirroring install.sh's
+# install_uv_pinned.
+function Install-UvPinned {
+    $assetName = $UvWindowsAssetName
+    $componentId = "uv-$UvVersion-$UvWindowsTarget"
+    $archiveUrl = "$UvReleaseBaseUrl/$assetName"
+    $installDirectory = Join-Path $env:USERPROFILE ".local\bin"
+    if ($DryRun) {
+        Write-Host "+ irm $archiveUrl -OutFile <temporary-archive>"
+        Write-Host "+ verify sha256 for $assetName against $($script:ChecksumsFile) (component: $componentId)"
+        Write-Host "+ extract and install uv.exe to $(Format-Argument (Join-Path $installDirectory 'uv.exe'))"
+        return
+    }
+
+    $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("fcc-uv-" + [guid]::NewGuid().ToString("N"))
+    $archivePath = Join-Path $temporaryRoot $assetName
+    $extractPath = Join-Path $temporaryRoot "extracted"
+    try {
+        New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
+        Write-Host "+ irm $archiveUrl -OutFile $(Format-Argument $archivePath)"
+        Invoke-RestMethod -Uri $archiveUrl -OutFile $archivePath -ErrorAction Stop
+        if ((-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) -or ((Get-Item -LiteralPath $archivePath).Length -eq 0)) {
+            throw "The uv release archive was empty."
+        }
+
+        # Fail-closed integrity gate before extracting the archive.
+        Confirm-PinnedFile -Path $archivePath -Label "uv $UvVersion archive ($assetName)" -ComponentId $componentId
+
+        Expand-Archive -LiteralPath $archivePath -DestinationPath $extractPath
+        $uvExecutables = @(Get-ChildItem -LiteralPath $extractPath -Recurse -File -Filter "uv.exe")
+        if ($uvExecutables.Count -ne 1) {
+            throw "The verified uv archive did not contain exactly one uv.exe."
+        }
+
+        New-Item -ItemType Directory -Force -Path $installDirectory | Out-Null
+        # Copy uv.exe (and uvx.exe when present) via a temp name + Move-Item so a
+        # concurrent PATH lookup never sees a half-written binary.
+        $binaries = @(@{ Name = "uv.exe"; Source = $uvExecutables[0].FullName })
+        $uvxExecutables = @(Get-ChildItem -LiteralPath $extractPath -Recurse -File -Filter "uvx.exe")
+        if ($uvxExecutables.Count -eq 1) {
+            $binaries += @{ Name = "uvx.exe"; Source = $uvxExecutables[0].FullName }
+        }
+        foreach ($binary in $binaries) {
+            $temporaryInstallPath = Join-Path $installDirectory ("." + $binary.Name + "-" + [guid]::NewGuid().ToString("N"))
+            Copy-Item -LiteralPath $binary.Source -Destination $temporaryInstallPath
+            if ((-not (Test-Path -LiteralPath $temporaryInstallPath -PathType Leaf)) -or ((Get-Item -LiteralPath $temporaryInstallPath).Length -eq 0)) {
+                Remove-Item -LiteralPath $temporaryInstallPath -Force -ErrorAction SilentlyContinue
+                throw "The extracted $($binary.Name) was empty."
+            }
+            Move-Item -LiteralPath $temporaryInstallPath -Destination (Join-Path $installDirectory $binary.Name) -Force
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Ensure-Uv {
     if ($DryRun) {
         if (Get-ApplicationCommand "uv") {
             Write-Host "+ uv --version"
-            Write-Host "A compatible existing uv will be left unchanged; an obsolete one will be replaced by the standalone installer."
+            Write-Host "A compatible existing uv will be left unchanged; an obsolete one will be replaced by the pinned uv $UvVersion release artifact."
         }
         else {
-            Write-Host "uv is not installed; the current standalone uv would be installed."
-            Invoke-DownloadedPowerShellInstaller -Url $UvInstallUrl -Name "uv"
+            Write-Host "uv is not installed; the pinned uv $UvVersion release artifact would be installed."
+            Install-UvPinned
             Confirm-Uv
         }
         return
@@ -1409,18 +1582,20 @@ function Ensure-Uv {
             Write-Host "uv $version already satisfies >=$MinUvVersion; leaving it unchanged."
             return
         }
-        Write-Host "uv $version does not satisfy stable >=$MinUvVersion; installing the current standalone uv."
+        Write-Host "uv $version does not satisfy stable >=$MinUvVersion; installing the pinned uv $UvVersion release artifact."
     }
     else {
-        Write-Host "uv is not installed; installing the current standalone uv."
+        Write-Host "uv is not installed; installing the pinned uv $UvVersion release artifact."
     }
 
-    Invoke-DownloadedPowerShellInstaller -Url $UvInstallUrl -Name "uv"
+    Install-UvPinned
     Add-KnownBinDirectories
     Confirm-Uv
 }
 
 function Get-PackageSpec {
+    param([string] $SourceUrl)
+
     $includeNim = $VoiceNim
     $includeLocal = $VoiceLocal
 
@@ -1430,33 +1605,100 @@ function Get-PackageSpec {
     }
 
     if ($includeNim -and $includeLocal) {
-        return "free-claude-code[voice,voice_local] @ $RepoArchiveUrl"
+        return "free-claude-code[voice,voice_local] @ $SourceUrl"
     }
     if ($includeNim) {
-        return "free-claude-code[voice] @ $RepoArchiveUrl"
+        return "free-claude-code[voice] @ $SourceUrl"
     }
     if ($includeLocal) {
-        return "free-claude-code[voice_local] @ $RepoArchiveUrl"
+        return "free-claude-code[voice_local] @ $SourceUrl"
     }
-    return "free-claude-code @ $RepoArchiveUrl"
+    return "free-claude-code @ $SourceUrl"
+}
+
+# True when $Ref is a full 40-hex-character commit SHA (cryptographically
+# pinnable). Mirrors install.sh's fcc_ref_is_full_sha.
+function Test-FccRefIsFullSha {
+    param([string] $Ref)
+
+    return ($Ref.Length -eq 40) -and ($Ref -match '^[0-9a-fA-F]{40}$')
+}
+
+# True when the installed uv accepts --locked on 'uv tool install', mirroring
+# install.sh's uv_locked_supported (a read-only capability probe).
+function Test-UvLockedSupported {
+    param([string] $UvPath)
+
+    try {
+        $help = (& $UvPath tool install --help 2>$null | Out-String)
+    }
+    catch {
+        return $false
+    }
+    return ($help -match '--locked')
+}
+
+# Clone Free Claude Code, detach onto the pinned commit, and verify HEAD equals
+# it, mirroring install.sh's clone_and_pin_fcc. Returns the checkout directory
+# (real run) or $null (dry-run). A full-40-hex -FccRef is cryptographically
+# pinned (mismatch is fatal); any other ref resolves with a loud warning.
+function Invoke-CloneAndPinFcc {
+    if ($DryRun) {
+        Write-Host "+ git clone $FccRepoUrl <temporary-checkout>"
+        Write-Host "+ git -C <temporary-checkout> checkout --detach $($script:FccRef)"
+        Write-Host "+ git -C <temporary-checkout> rev-parse HEAD"
+        if (Test-FccRefIsFullSha $script:FccRef) {
+            Write-Host "+ verify HEAD equals pinned commit $($script:FccRef)"
+        }
+        else {
+            Write-Host "+ warn: -FccRef $($script:FccRef) is not a full 40-hex commit SHA (not cryptographically pinned)"
+        }
+        return $null
+    }
+
+    $git = Get-ApplicationCommand "git"
+    if (-not $git) {
+        throw "git is required to install Free Claude Code from a pinned commit. Install Git for Windows from https://git-scm.com/download/win, then rerun the installer."
+    }
+
+    $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("fcc-src-" + [guid]::NewGuid().ToString("N"))
+    $checkoutDir = Join-Path $temporaryRoot "free-claude-code"
+    New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
+    Invoke-NativeCommand -FilePath $git.Source -Arguments @("clone", $FccRepoUrl, $checkoutDir)
+    Invoke-NativeCommand -FilePath $git.Source -Arguments @("-C", $checkoutDir, "checkout", "--detach", $script:FccRef)
+    $headCommit = Invoke-Utf8NativeCapture -FilePath $git.Source -Arguments @("-C", $checkoutDir, "rev-parse", "HEAD")
+    if ([string]::IsNullOrWhiteSpace($headCommit)) {
+        throw "Could not resolve the checked-out Free Claude Code commit."
+    }
+
+    if (Test-FccRefIsFullSha $script:FccRef) {
+        # git rev-parse emits lowercase hex; normalize both sides so an uppercase
+        # -FccRef still compares equal instead of confusingly failing closed.
+        if ($headCommit.Trim().ToLowerInvariant() -ne $script:FccRef.Trim().ToLowerInvariant()) {
+            throw "Free Claude Code commit verification failed: expected $($script:FccRef), checked out $headCommit."
+        }
+        Write-Host "Pinned Free Claude Code to verified commit $headCommit."
+    }
+    else {
+        Write-Warning "-FccRef '$($script:FccRef)' is not a full 40-hex commit SHA; resolved to $headCommit but NOT cryptographically pinned."
+    }
+
+    return $checkoutDir
 }
 
 function Install-FreeClaudeCode {
     Assert-NoFccProcessesRunning
-    $packageSpec = Get-PackageSpec
-    $arguments = @(
-        "tool",
-        "install",
-        "--force",
-        "--refresh-package",
-        "free-claude-code",
-        "--python",
-        $PythonRequest
-    )
-    if (-not [string]::IsNullOrWhiteSpace($TorchBackend)) {
-        $arguments += @("--torch-backend", $TorchBackend)
+    $checkoutDir = Invoke-CloneAndPinFcc
+
+    if ($DryRun) {
+        $sourceUrl = "file://<temporary-checkout>"
     }
-    $arguments += $packageSpec
+    else {
+        # A local directory PEP 508 direct reference; AbsoluteUri yields the
+        # canonical file:///C:/... form uv accepts on Windows.
+        $sourceUrl = ([uri] $checkoutDir).AbsoluteUri
+    }
+    $packageSpec = Get-PackageSpec -SourceUrl $sourceUrl
 
     $uvPath = "uv"
     if (-not $DryRun) {
@@ -1466,7 +1708,38 @@ function Install-FreeClaudeCode {
         }
         $uvPath = $uvCommand.Source
     }
-    Invoke-NativeCommand -FilePath $uvPath -Arguments $arguments
+
+    $arguments = @(
+        "tool",
+        "install",
+        "--force",
+        "--refresh-package",
+        "free-claude-code",
+        "--python",
+        $PythonRequest
+    )
+    # Pin FCC's full dependency closure by honoring the checkout's uv.lock, but
+    # only when the installed uv advertises --locked (capability check), so an
+    # older/newer uv that does not accept the flag never breaks the install.
+    if ((-not $DryRun) -and (Test-UvLockedSupported -UvPath $uvPath)) {
+        $arguments += "--locked"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($TorchBackend)) {
+        $arguments += @("--torch-backend", $TorchBackend)
+    }
+    $arguments += $packageSpec
+
+    try {
+        Invoke-NativeCommand -FilePath $uvPath -Arguments $arguments
+    }
+    finally {
+        if ((-not $DryRun) -and $checkoutDir) {
+            $checkoutParent = Split-Path -Parent $checkoutDir
+            if ((-not [string]::IsNullOrWhiteSpace($checkoutParent)) -and (Test-Path -LiteralPath $checkoutParent)) {
+                Remove-Item -LiteralPath $checkoutParent -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
 }
 
 function Export-FccDesktopIcon {
@@ -1482,10 +1755,18 @@ function Export-FccDesktopIcon {
         return
     }
 
-    # PowerShell does not wait when directly invoking a Windows GUI executable.
+    # PowerShell does not wait when directly invoking a Windows GUI executable, so
+    # Start-Process -Wait is required. -ArgumentList passes a single command line
+    # that the child re-parses, so the path is wrapped in double quotes to survive
+    # spaces in $env:USERPROFILE. $IconPath here is a fixed, installer-controlled
+    # path ("<USERPROFILE>\.fcc\app-icon.ico"): it never ends in a backslash and
+    # Windows paths cannot contain a double quote, so this quoting is exact for
+    # every valid value. (Do not feed an untrusted/user-typed path here without
+    # full CommandLineToArgvW-style escaping of trailing backslashes and quotes.)
+    $quotedIconArgument = '"' + $IconPath + '"'
     $process = Start-Process `
         -FilePath $DesktopCommand `
-        -ArgumentList @("--export-icon", ('"' + $IconPath + '"')) `
+        -ArgumentList @("--export-icon", $quotedIconArgument) `
         -WindowStyle Hidden `
         -Wait `
         -PassThru
@@ -1623,6 +1904,94 @@ function Install-FccDesktopShortcuts {
     }
 }
 
+# -RefreshChecksums support: download an artifact (or `npm pack` a package) into a
+# temp file, print "id=<sha256>" to stdout, and clean up. Executes nothing.
+# Failures print a "# id: reason" comment to stderr and continue, mirroring
+# install.sh's refresh_one / refresh_npm_pack.
+function Invoke-RefreshOne {
+    param([string] $Id, [string] $Url)
+
+    $temporaryFile = Join-Path ([IO.Path]::GetTempPath()) ("fcc-refresh-" + [guid]::NewGuid().ToString("N"))
+    try {
+        try {
+            Invoke-RestMethod -Uri $Url -OutFile $temporaryFile -ErrorAction Stop
+        }
+        catch {
+            [Console]::Error.WriteLine("# ${Id}: download failed ($Url)")
+            return
+        }
+        if ((-not (Test-Path -LiteralPath $temporaryFile -PathType Leaf)) -or ((Get-Item -LiteralPath $temporaryFile).Length -eq 0)) {
+            [Console]::Error.WriteLine("# ${Id}: downloaded file was empty ($Url)")
+            return
+        }
+        Write-Output ("{0}={1}" -f $Id, (Get-FileSha256 -Path $temporaryFile))
+    }
+    finally {
+        Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-RefreshNpmPack {
+    param([string] $Id, [string] $Spec)
+
+    $npm = Get-ApplicationCommand "npm"
+    if (-not $npm) {
+        [Console]::Error.WriteLine("# ${Id}: npm not available; skipping")
+        return
+    }
+
+    $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("fcc-refresh-npm-" + [guid]::NewGuid().ToString("N"))
+    try {
+        New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
+        $global:LASTEXITCODE = 0
+        & $npm.Source pack $Spec --pack-destination $temporaryRoot --ignore-scripts *> $null
+        if ($LASTEXITCODE -ne 0) {
+            [Console]::Error.WriteLine("# ${Id}: npm pack failed ($Spec)")
+            return
+        }
+        $tarballs = @(Get-ChildItem -LiteralPath $temporaryRoot -Filter "*.tgz")
+        if ($tarballs.Count -eq 0) {
+            [Console]::Error.WriteLine("# ${Id}: npm pack did not produce a tarball ($Spec)")
+            return
+        }
+        Write-Output ("{0}={1}" -f $Id, (Get-FileSha256 -Path $tarballs[0].FullName))
+    }
+    finally {
+        Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-RefreshAllChecksums {
+    $architecture = $env:PROCESSOR_ARCHITEW6432
+    if ([string]::IsNullOrWhiteSpace($architecture)) {
+        $architecture = $env:PROCESSOR_ARCHITECTURE
+    }
+    if ([string]::IsNullOrWhiteSpace($architecture)) {
+        $architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+    }
+
+    Write-Output "# install.ps1 -RefreshChecksums output."
+    Write-Output "# Review every hash against a trusted source (vendor release page / published"
+    Write-Output "# checksums) before pasting it into $($script:ChecksumsFile), replacing REPLACE_ME."
+    Write-Output "# Platform: Windows $architecture"
+    Invoke-RefreshOne -Id "claude-installer-ps1" -Url $ClaudeInstallUrl
+    Invoke-RefreshOne -Id "codex-installer-ps1" -Url $CodexInstallUrl
+    Invoke-RefreshOne -Id "pi-installer-ps1" -Url $PiInstallUrl
+    Invoke-RefreshOne -Id "hermes-installer-ps1" -Url $HermesInstallUrl
+    Invoke-RefreshOne -Id "grok-installer-ps1" -Url $GrokInstallUrl
+    try {
+        $openCodeAsset = Get-OpenCodeWindowsAssetName
+        Invoke-RefreshOne -Id ($openCodeAsset -replace '\.zip$', '') -Url "$OpenCodeReleaseBaseUrl/$openCodeAsset"
+    }
+    catch {
+        [Console]::Error.WriteLine("# opencode-windows: $($_.Exception.Message)")
+    }
+    Invoke-RefreshOne -Id "uv-$UvVersion-$UvWindowsTarget" -Url "$UvReleaseBaseUrl/$UvWindowsAssetName"
+    Invoke-RefreshOne -Id "rtk-$RtkVersion-$RtkWindowsTarget" -Url "$RtkReleaseBaseUrl/$RtkWindowsAssetName"
+    Invoke-RefreshNpmPack -Id "npm-cline-$MinClineVersion" -Spec $ClinePackage
+    Invoke-RefreshNpmPack -Id "npm-dsh-$DshVersion" -Spec $DshPackage
+}
+
 if ($Help) {
     Show-Usage
     return
@@ -1635,6 +2004,21 @@ if ($RemainingArgs.Count -gt 0) {
 
 if ((-not [string]::IsNullOrWhiteSpace($TorchBackend)) -and (-not ($VoiceLocal -or $VoiceAll))) {
     throw "-TorchBackend requires -VoiceLocal or -VoiceAll."
+}
+
+Resolve-ChecksumsFile
+$script:FccRef = if ([string]::IsNullOrWhiteSpace($FccRef)) { $FccCommit } else { $FccRef }
+
+if ($RefreshChecksums) {
+    Write-Step "Refreshing checksums (no code will be executed)"
+    Invoke-RefreshAllChecksums
+    [Console]::Error.WriteLine("")
+    [Console]::Error.WriteLine("Review each hash above against a trusted source, then paste the id=hash lines into $($script:ChecksumsFile).")
+    return
+}
+
+if ($AllowUnpinned) {
+    Write-UnpinnedBanner
 }
 
 Add-KnownBinDirectories
@@ -1655,6 +2039,12 @@ if (-not (Test-InteractiveInstaller)) {
 if (Test-InteractiveInstaller) {
     Write-Step "Choosing coding agents"
     Select-CodingAgents
+}
+
+# Free Claude Code is always installed from a pinned git checkout, so git is
+# always required. Fail fast before installing any coding agents.
+if ((-not $DryRun) -and (-not (Get-ApplicationCommand "git"))) {
+    throw "git is required to install Free Claude Code from a pinned commit. Install Git for Windows from https://git-scm.com/download/win, then rerun the installer."
 }
 
 Ensure-SelectedCodingAgents
