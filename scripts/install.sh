@@ -1,9 +1,24 @@
 #!/bin/sh
 set -eu
 
-REPO_ARCHIVE_URL="https://github.com/Alishahryar1/free-claude-code/archive/refs/heads/main.zip"
+# Supply-chain-hardened installer for Free Claude Code.
+#
+# Every remotely downloaded installer script or release artifact is verified
+# against a pinned sha256 in scripts/install.checksums BEFORE it is executed or
+# extracted. The installer is FAIL-CLOSED: a component whose expected checksum is
+# missing or the literal token REPLACE_ME is refused unless --allow-unpinned is
+# passed. Free Claude Code itself is installed from a git checkout pinned to an
+# exact commit, not an unversioned archive.
+
+FCC_REPO_URL="https://github.com/alishahryar1/free-claude-code"
+# Default pinned Free Claude Code commit (real, verified main HEAD).
+FCC_COMMIT="9372cfa5e2dc48fe1adf9743473f3763b3b08592"
 PYTHON_VERSION="3.14.0"
 MIN_UV_VERSION="0.11.16"
+# uv is pinned to a versioned astral-sh/uv release artifact (not the rolling
+# astral.sh/uv/install.sh script). The per-platform sha256 lives in the manifest.
+UV_VERSION="0.11.16"
+UV_RELEASE_BASE_URL="https://github.com/astral-sh/uv/releases/download/$UV_VERSION"
 CLAUDE_INSTALL_URL="https://claude.ai/install.sh"
 CODEX_INSTALL_URL="https://chatgpt.com/codex/install.sh"
 PI_INSTALL_URL="https://pi.dev/install.sh"
@@ -20,7 +35,6 @@ MUSE_INSTALL_URL="https://dev.meta.ai/install.sh"
 MIN_MUSE_VERSION="0.2.1"
 RTK_VERSION="0.44.2"
 RTK_RELEASE_BASE_URL="https://github.com/rtk-ai/rtk/releases/download/v$RTK_VERSION"
-UV_INSTALL_URL="https://astral.sh/uv/install.sh"
 FCC_MACOS_BUNDLE_ID="io.github.alishahryar1.free-claude-code"
 FCC_MACOS_OWNER_FILE=".free-claude-code-owner"
 # Include retired entry points so updates reject older FCC processes before replacement.
@@ -41,17 +55,30 @@ install_grok=1
 install_muse=1
 enable_rtk=0
 torch_backend=""
+allow_unpinned=0
+refresh_mode=0
+checksums_file_cli=""
+checksums_file=""
+script_dir="."
+fcc_ref="$FCC_COMMIT"
+fcc_source_url=""
 temporary_file=""
 temporary_binary=""
+temporary_dir=""
 tool_bin=""
 pi_available=0
 rtk_path=""
+expected_checksum=""
+checksum_mode=""
 
 show_usage() {
     cat <<'USAGE'
 Usage: install.sh [options]
 
 Installs or updates Free Claude Code and lets you choose which coding agents to install or verify.
+Every downloaded installer script and release artifact is checksum-verified against a pinned
+manifest (scripts/install.checksums) before it runs. Unpinned components are refused unless you
+explicitly pass --allow-unpinned.
 
 Options:
   --voice-nim              Install NVIDIA NIM voice transcription support.
@@ -59,6 +86,11 @@ Options:
   --voice-all              Install all voice transcription backends.
   --torch-backend VALUE    Use a uv PyTorch backend, such as cu130. Requires local voice.
   --rtk                    Install and configure RTK for the selected coding agents.
+  --fcc-ref SHA            Install Free Claude Code at this git commit (default: pinned commit).
+  --checksums PATH         Path to the checksum manifest (default: install.checksums beside this script).
+  --allow-unpinned         Execute components without a pinned checksum. INSECURE; prints a warning.
+  --refresh-checksums      Download each installer/artifact, print id=sha256 lines, and exit.
+                           Does NOT execute anything and does NOT modify the manifest.
   --dry-run                Print commands without running them.
   --help                   Show this help text.
 USAGE
@@ -246,11 +278,181 @@ cleanup() {
     if [ -n "$temporary_binary" ] && [ -e "$temporary_binary" ]; then
         rm -f "$temporary_binary"
     fi
+    if [ -n "$temporary_dir" ] && [ -d "$temporary_dir" ]; then
+        rm -rf "$temporary_dir"
+    fi
 }
 
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' HUP TERM
+
+# ---------------------------------------------------------------------------
+# Checksum manifest + verification
+# ---------------------------------------------------------------------------
+
+resolve_script_dir() {
+    case "$0" in
+        /*) script_dir=$(dirname "$0") ;;
+        *) script_dir=$(dirname "$(pwd)/$0") ;;
+    esac
+}
+
+resolve_checksums_file() {
+    if [ -n "$checksums_file_cli" ]; then
+        checksums_file=$checksums_file_cli
+    elif [ -n "${FCC_CHECKSUMS_FILE:-}" ]; then
+        checksums_file=$FCC_CHECKSUMS_FILE
+    else
+        checksums_file="$script_dir/install.checksums"
+    fi
+}
+
+require_sha256_tool() {
+    [ "$dry_run" -eq 0 ] || return 0
+    if command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1; then
+        return 0
+    fi
+    fail "This installer requires sha256sum or 'shasum -a 256' for checksum verification. Install one, then rerun."
+}
+
+compute_sha256() {
+    file=$1
+    if command -v sha256sum >/dev/null 2>&1; then
+        out=$(sha256sum "$file") || return 1
+    elif command -v shasum >/dev/null 2>&1; then
+        out=$(shasum -a 256 "$file") || return 1
+    else
+        return 1
+    fi
+    printf '%s' "${out%% *}"
+}
+
+# Print the pinned sha256 for a component id, or nothing if absent.
+manifest_lookup() {
+    lookup_id=$1
+    [ -f "$checksums_file" ] || return 0
+    while IFS= read -r manifest_line || [ -n "$manifest_line" ]; do
+        case "$manifest_line" in
+            '#'*|'') continue ;;
+        esac
+        manifest_key=${manifest_line%%=*}
+        manifest_value=${manifest_line#*=}
+        manifest_key=$(printf '%s' "$manifest_key" | tr -d '[:space:]')
+        if [ "$manifest_key" = "$lookup_id" ]; then
+            # Strip any inline comment (from the first '#') and all surrounding
+            # whitespace so "id=REPLACE_ME # note" still reads as the REPLACE_ME
+            # sentinel (fail-closed) rather than a bogus pin. Valid values (hex or
+            # REPLACE_ME) never contain '#'.
+            manifest_value=${manifest_value%%#*}
+            printf '%s' "$(printf '%s' "$manifest_value" | tr -d '[:space:]')"
+            return 0
+        fi
+    done < "$checksums_file"
+}
+
+print_unpinned_banner() {
+    {
+        printf '%s\n' '********************************************************************************'
+        printf '%s\n' '*                   SECURITY WARNING: --allow-unpinned is set                 *'
+        printf '%s\n' '*                                                                            *'
+        printf '%s\n' '* Checksum verification is DISABLED for every component whose sha256 is       *'
+        printf '%s\n' '* missing or REPLACE_ME in the manifest. Downloaded installer scripts and     *'
+        printf '%s\n' '* release artifacts will be EXECUTED WITHOUT integrity verification.          *'
+        printf '%s\n' '* This exposes you to supply-chain tampering and man-in-the-middle attacks.   *'
+        printf '%s\n' '* Only continue if you fully trust your network path and every upstream       *'
+        printf '%s\n' '* vendor. Prefer pinning real hashes via --refresh-checksums instead.         *'
+        printf '%s\n' '********************************************************************************'
+    } >&2
+}
+
+# Decide how a component must be handled. Sets expected_checksum and checksum_mode
+# to "verify" or "skip", or fails closed.
+resolve_component_checksum() {
+    component_id=$1
+    label=$2
+    expected_checksum=$(manifest_lookup "$component_id")
+
+    if [ -n "$expected_checksum" ] && [ "$expected_checksum" != "REPLACE_ME" ]; then
+        checksum_mode="verify"
+        return 0
+    fi
+
+    if [ "$allow_unpinned" -eq 1 ]; then
+        checksum_mode="skip"
+        printf 'warning: no pinned sha256 for component "%s" (%s); executing UNVERIFIED because --allow-unpinned is set.\n' "$component_id" "$label" >&2
+        return 0
+    fi
+
+    if [ ! -f "$checksums_file" ]; then
+        fail "Checksum manifest not found at $checksums_file. This hardened installer refuses to run downloaded code without it. Run from a repository checkout, set FCC_CHECKSUMS_FILE, pass --checksums <path>, or re-run with --allow-unpinned (NOT recommended)."
+    fi
+
+    fail "No pinned sha256 for component \"$component_id\" ($label) in $checksums_file (value is missing or REPLACE_ME). Refusing to run unverified code. Run 'install.sh --refresh-checksums' to compute it, review it against a trusted source, paste the id=hash line into the manifest, then rerun; or re-run with --allow-unpinned to bypass verification (NOT recommended)."
+}
+
+# Verify an already-downloaded file for a component, or fail.
+verify_downloaded_file() {
+    file=$1
+    label=$2
+    component_id=$3
+
+    resolve_component_checksum "$component_id" "$label"
+
+    actual_checksum=$(compute_sha256 "$file") || fail "Could not compute the sha256 of the downloaded $label file."
+
+    if [ "$checksum_mode" = "skip" ]; then
+        printf 'warning: %s executed without verification; computed sha256=%s (component id: %s)\n' "$label" "$actual_checksum" "$component_id" >&2
+        return 0
+    fi
+
+    if [ "$actual_checksum" != "$expected_checksum" ]; then
+        fail "Checksum verification failed for $label (component id: $component_id): expected $expected_checksum, computed $actual_checksum. Refusing to continue."
+    fi
+    printf 'Verified %s against pinned sha256 (component id: %s).\n' "$label" "$component_id"
+}
+
+refresh_one() {
+    refresh_id=$1
+    refresh_url=$2
+    refresh_tmp=$(mktemp "${TMPDIR:-/tmp}/fcc-refresh.XXXXXX") || {
+        printf '# %s: could not create a temporary file\n' "$refresh_id" >&2
+        return 0
+    }
+    if curl -fsSL "$refresh_url" -o "$refresh_tmp"; then
+        if [ -s "$refresh_tmp" ]; then
+            refresh_hash=$(compute_sha256 "$refresh_tmp") || refresh_hash=""
+            if [ -n "$refresh_hash" ]; then
+                printf '%s=%s\n' "$refresh_id" "$refresh_hash"
+            else
+                printf '# %s: could not compute sha256\n' "$refresh_id" >&2
+            fi
+        else
+            printf '# %s: downloaded file was empty (%s)\n' "$refresh_id" "$refresh_url" >&2
+        fi
+    else
+        printf '# %s: download failed (%s)\n' "$refresh_id" "$refresh_url" >&2
+    fi
+    rm -f "$refresh_tmp"
+}
+
+refresh_all_checksums() {
+    printf '# install.sh --refresh-checksums output.\n'
+    printf '# Review every hash against a trusted source (vendor release page / published\n'
+    printf '# checksums) before pasting it into %s, replacing REPLACE_ME.\n' "$checksums_file"
+    printf '# Platform: %s %s\n' "$(uname -s)" "$(uname -m)"
+    refresh_one "claude-installer" "$CLAUDE_INSTALL_URL"
+    refresh_one "codex-installer" "$CODEX_INSTALL_URL"
+    refresh_one "pi-installer" "$PI_INSTALL_URL"
+    refresh_one "opencode-installer" "$OPENCODE_INSTALL_URL"
+    refresh_one "hermes-installer" "$HERMES_INSTALL_URL"
+    refresh_one "grok-installer" "$GROK_INSTALL_URL"
+    refresh_one "muse-installer" "$MUSE_INSTALL_URL"
+    select_uv_release
+    refresh_one "$uv_component_id" "$uv_archive_url"
+    select_rtk_release
+    refresh_one "$rtk_component_id" "$rtk_archive_url"
+}
 
 add_path_entry() {
     [ -n "$1" ] || return 0
@@ -342,11 +544,13 @@ require_command() {
     fi
 }
 
-download_and_run() {
+# download_verify_and_run URL INTERPRETER LABEL COMPONENT_ID [NON_INTERACTIVE] [ARGS...]
+download_verify_and_run() {
     url=$1
     interpreter=$2
     label=$3
-    shift 3
+    component_id=$4
+    shift 4
     non_interactive=0
     if [ "$#" -gt 0 ]; then
         non_interactive=$1
@@ -355,6 +559,7 @@ download_and_run() {
 
     if [ "$dry_run" -eq 1 ]; then
         print_command curl -fsSL "$url" -o "<temporary-script>"
+        printf '+ verify sha256 of <temporary-script> against %s (component: %s)\n' "$checksums_file" "$component_id"
         if [ "$non_interactive" -eq 1 ]; then
             printf '+ CODEX_NON_INTERACTIVE=1 '
             quote_arg "$interpreter"
@@ -382,6 +587,8 @@ download_and_run() {
     if [ ! -s "$temporary_file" ]; then
         fail "The downloaded $label installer was empty."
     fi
+
+    verify_downloaded_file "$temporary_file" "$label" "$component_id"
 
     if [ "$non_interactive" -eq 1 ]; then
         printf '+ CODEX_NON_INTERACTIVE=1 '
@@ -476,32 +683,32 @@ select_rtk_release() {
     case "$rtk_platform:$rtk_architecture" in
         Linux:x86_64|Linux:amd64)
             rtk_asset_name="rtk-x86_64-unknown-linux-musl.tar.gz"
-            rtk_asset_sha256="d94cc2a3e57fa534892b5235a726e7eeb7523f205a5f8f48f853bfcae7be7e33"
+            rtk_component_id="rtk-$RTK_VERSION-x86_64-unknown-linux-musl"
             ;;
         Linux:aarch64|Linux:arm64)
             rtk_asset_name="rtk-aarch64-unknown-linux-gnu.tar.gz"
-            rtk_asset_sha256="5cd3f7fa2697faf9e5b77a10ce4e699006e02d4752d792f06550697eb4b8e8a9"
+            rtk_component_id="rtk-$RTK_VERSION-aarch64-unknown-linux-gnu"
             ;;
         Darwin:x86_64|Darwin:amd64)
             rtk_asset_name="rtk-x86_64-apple-darwin.tar.gz"
-            rtk_asset_sha256="636f808db86b2cefab7db7dd9393da8b6e4721bb2ffaa0644e3ffa52d3420d81"
+            rtk_component_id="rtk-$RTK_VERSION-x86_64-apple-darwin"
             ;;
         Darwin:aarch64|Darwin:arm64)
             rtk_asset_name="rtk-aarch64-apple-darwin.tar.gz"
-            rtk_asset_sha256="b7c2218eca538b54e63fa594a8ce58bd3716851b01b3b0dc026515323baf6393"
+            rtk_component_id="rtk-$RTK_VERSION-aarch64-apple-darwin"
             ;;
         *)
             fail "RTK $RTK_VERSION does not provide a release for $rtk_platform $rtk_architecture."
             ;;
     esac
+    rtk_archive_url="$RTK_RELEASE_BASE_URL/$rtk_asset_name"
 }
 
 install_rtk() {
     select_rtk_release
-    rtk_archive_url="$RTK_RELEASE_BASE_URL/$rtk_asset_name"
     if [ "$dry_run" -eq 1 ]; then
         print_command curl -fsSL "$rtk_archive_url" -o "<temporary-archive>"
-        printf '+ verify pinned SHA-256 for %s\n' "$rtk_asset_name"
+        printf '+ verify sha256 for %s against %s (component: %s)\n' "$rtk_asset_name" "$checksums_file" "$rtk_component_id"
         printf '+ extract rtk to %s\n' "${HOME:-~}/.local/bin/rtk"
         return 0
     fi
@@ -517,17 +724,7 @@ install_rtk() {
     fi
     [ -s "$temporary_file" ] || fail "The downloaded RTK archive was empty."
 
-    if command -v sha256sum >/dev/null 2>&1; then
-        print_command sha256sum "$temporary_file"
-        rtk_actual_sha256=$(sha256sum "$temporary_file") || fail "Could not hash the downloaded RTK archive."
-    elif command -v shasum >/dev/null 2>&1; then
-        print_command shasum -a 256 "$temporary_file"
-        rtk_actual_sha256=$(shasum -a 256 "$temporary_file") || fail "Could not hash the downloaded RTK archive."
-    else
-        fail "RTK installation requires sha256sum or shasum for checksum verification."
-    fi
-    rtk_actual_sha256=${rtk_actual_sha256%% *}
-    [ "$rtk_actual_sha256" = "$rtk_asset_sha256" ] || fail "RTK checksum verification failed for $rtk_asset_name."
+    verify_downloaded_file "$temporary_file" "RTK $RTK_VERSION archive ($rtk_asset_name)" "$rtk_component_id"
 
     if rtk_archive_entries=$(tar -tzf "$temporary_file"); then
         :
@@ -617,7 +814,7 @@ ensure_claude() {
     if command -v claude >/dev/null 2>&1; then
         printf 'Claude Code already found on PATH; verifying it.\n'
     else
-        download_and_run "$CLAUDE_INSTALL_URL" bash "Claude Code"
+        download_verify_and_run "$CLAUDE_INSTALL_URL" bash "Claude Code" claude-installer
         add_known_bin_directories
     fi
 
@@ -628,7 +825,7 @@ ensure_codex() {
     if command -v codex >/dev/null 2>&1; then
         printf 'Codex already found on PATH; verifying it.\n'
     else
-        download_and_run "$CODEX_INSTALL_URL" sh "Codex" 1
+        download_verify_and_run "$CODEX_INSTALL_URL" sh "Codex" codex-installer 1
         add_known_bin_directories
     fi
 
@@ -648,7 +845,7 @@ ensure_pi() {
         if [ -n "$existing_pi_path" ]; then
             printf "The existing 'pi' command at %s is not Pi Coding Agent; installing Pi.\n" "$existing_pi_path"
         fi
-        download_and_run "$PI_INSTALL_URL" sh "Pi"
+        download_verify_and_run "$PI_INSTALL_URL" sh "Pi" pi-installer
         add_npm_bin_directories
 
         if [ "$dry_run" -eq 0 ]; then
@@ -705,7 +902,7 @@ ensure_opencode() {
             print_command opencode --version
             printf 'A compatible OpenCode will be preserved; an older version will be upgraded with opencode upgrade.\n'
         else
-            download_and_run "$OPENCODE_INSTALL_URL" bash "OpenCode"
+            download_verify_and_run "$OPENCODE_INSTALL_URL" bash "OpenCode" opencode-installer
         fi
         verify_opencode_command
         return 0
@@ -721,7 +918,7 @@ ensure_opencode() {
         run opencode upgrade
         add_known_bin_directories
     else
-        download_and_run "$OPENCODE_INSTALL_URL" bash "OpenCode"
+        download_verify_and_run "$OPENCODE_INSTALL_URL" bash "OpenCode" opencode-installer
         add_known_bin_directories
     fi
 
@@ -846,7 +1043,7 @@ confirm_hermes_platform() {
 
 install_hermes() {
     confirm_hermes_platform
-    download_and_run "$HERMES_INSTALL_URL" bash "Hermes Agent" 0 --non-interactive --skip-setup
+    download_verify_and_run "$HERMES_INSTALL_URL" bash "Hermes Agent" hermes-installer 0 --non-interactive --skip-setup
     add_known_bin_directories
 }
 
@@ -1020,7 +1217,7 @@ verify_grok_command() {
 }
 
 install_grok_build() {
-    download_and_run "$GROK_INSTALL_URL" bash "Grok Build"
+    download_verify_and_run "$GROK_INSTALL_URL" bash "Grok Build" grok-installer
     add_known_bin_directories
 }
 
@@ -1086,7 +1283,7 @@ install_muse_code() {
         Darwin|Linux) ;;
         *) fail "Meta's official Muse Code installer supports macOS, Linux, and WSL only." ;;
     esac
-    download_and_run "$MUSE_INSTALL_URL" bash "Muse Code"
+    download_verify_and_run "$MUSE_INSTALL_URL" bash "Muse Code" muse-installer
     add_known_bin_directories
 }
 
@@ -1231,14 +1428,109 @@ verify_uv() {
     printf 'Verified uv %s.\n' "$version"
 }
 
+select_uv_release() {
+    uv_platform=$(uname -s)
+    uv_architecture=$(uname -m)
+    case "$uv_platform:$uv_architecture" in
+        Linux:x86_64|Linux:amd64) uv_target="x86_64-unknown-linux-gnu" ;;
+        Linux:aarch64|Linux:arm64) uv_target="aarch64-unknown-linux-gnu" ;;
+        Darwin:x86_64|Darwin:amd64) uv_target="x86_64-apple-darwin" ;;
+        Darwin:aarch64|Darwin:arm64) uv_target="aarch64-apple-darwin" ;;
+        *) fail "uv $UV_VERSION does not provide a pinned release for $uv_platform $uv_architecture." ;;
+    esac
+    uv_asset_name="uv-$uv_target.tar.gz"
+    uv_component_id="uv-$UV_VERSION-$uv_target"
+    uv_archive_url="$UV_RELEASE_BASE_URL/$uv_asset_name"
+}
+
+install_uv_pinned() {
+    select_uv_release
+    if [ "$dry_run" -eq 1 ]; then
+        print_command curl -fsSL "$uv_archive_url" -o "<temporary-archive>"
+        printf '+ verify sha256 for %s against %s (component: %s)\n' "$uv_asset_name" "$checksums_file" "$uv_component_id"
+        printf '+ extract uv to %s\n' "${HOME:-~}/.local/bin/uv"
+        return 0
+    fi
+
+    [ -n "${HOME:-}" ] || fail "HOME is required to install uv."
+    temporary_file=$(mktemp "${TMPDIR:-/tmp}/fcc-uv.XXXXXX") || fail "Unable to create a temporary uv archive."
+    print_command curl -fsSL "$uv_archive_url" -o "$temporary_file"
+    if curl -fsSL "$uv_archive_url" -o "$temporary_file"; then
+        :
+    else
+        status=$?
+        fail "Could not download uv $UV_VERSION (curl exit code $status)."
+    fi
+    [ -s "$temporary_file" ] || fail "The downloaded uv archive was empty."
+
+    verify_downloaded_file "$temporary_file" "uv $UV_VERSION archive ($uv_asset_name)" "$uv_component_id"
+
+    # Validate the archive layout BEFORE extracting: every entry must live under
+    # the single expected top-level directory, with no absolute paths and no
+    # parent-directory traversal. This bounds what an unexpected archive (only
+    # reachable under --allow-unpinned) can drop, mirroring RTK's entry check.
+    uv_expected_root="uv-$uv_target"
+    if uv_archive_entries=$(tar -tzf "$temporary_file"); then
+        :
+    else
+        fail "The verified uv archive could not be inspected."
+    fi
+    if ! printf '%s\n' "$uv_archive_entries" | while IFS= read -r uv_entry; do
+            [ -n "$uv_entry" ] || continue
+            case "$uv_entry" in
+                /*|../*|*/../*|*/..|..) exit 3 ;;
+            esac
+            case "$uv_entry" in
+                "$uv_expected_root"|"$uv_expected_root"/*) ;;
+                *) exit 3 ;;
+            esac
+        done; then
+        fail "The verified uv archive contained unexpected or unsafe entries (expected everything under $uv_expected_root/)."
+    fi
+
+    temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/fcc-uv-extract.XXXXXX") || fail "Unable to create a temporary uv extraction directory."
+    print_command tar -xzf "$temporary_file" -C "$temporary_dir"
+    if tar -xzf "$temporary_file" -C "$temporary_dir"; then
+        :
+    else
+        fail "The verified uv archive could not be extracted."
+    fi
+
+    # Copy out only the uv binary from the validated, isolated extraction dir.
+    uv_extracted="$temporary_dir/$uv_expected_root/uv"
+    [ -f "$uv_extracted" ] || fail "The verified uv archive did not contain $uv_expected_root/uv."
+
+    uv_install_directory="$HOME/.local/bin"
+    run mkdir -p "$uv_install_directory"
+    temporary_binary=$(mktemp "$uv_install_directory/.uv.XXXXXX") || fail "Unable to create a temporary uv executable."
+    run cp "$uv_extracted" "$temporary_binary"
+    run chmod +x "$temporary_binary"
+    run mv "$temporary_binary" "$uv_install_directory/uv"
+    temporary_binary=""
+    rm -rf "$temporary_dir"
+    temporary_dir=""
+    rm -f "$temporary_file"
+    temporary_file=""
+}
+
+# True (exit 0) when ensure_uv would download+extract the pinned uv artifact.
+uv_needs_install() {
+    command -v uv >/dev/null 2>&1 || return 0
+    version=$(current_uv_version) || return 0
+    if stable_version_is_supported "$version" "$MIN_UV_VERSION"; then
+        return 1
+    fi
+    return 0
+}
+
 ensure_uv() {
     if [ "$dry_run" -eq 1 ]; then
         if command -v uv >/dev/null 2>&1; then
             print_command uv --version
-            printf 'A compatible existing uv will be left unchanged; an obsolete one will be replaced by the standalone installer.\n'
+            printf 'A compatible existing uv will be left unchanged; an obsolete one will be replaced by the pinned uv %s release artifact.\n' "$UV_VERSION"
         else
-            printf 'uv is not installed; the current standalone uv would be installed.\n'
-            download_and_run "$UV_INSTALL_URL" sh "uv"
+            printf 'uv is not installed; the pinned uv %s release artifact would be installed.\n' "$UV_VERSION"
+            install_uv_pinned
             verify_uv
         fi
         return 0
@@ -1250,12 +1542,12 @@ ensure_uv() {
             printf 'uv %s already satisfies >=%s; leaving it unchanged.\n' "$version" "$MIN_UV_VERSION"
             return 0
         fi
-        printf 'uv %s does not satisfy stable >=%s; installing the current standalone uv.\n' "$version" "$MIN_UV_VERSION"
+        printf 'uv %s does not satisfy stable >=%s; installing the pinned uv %s release artifact.\n' "$version" "$MIN_UV_VERSION" "$UV_VERSION"
     else
-        printf 'uv is not installed; installing the current standalone uv.\n'
+        printf 'uv is not installed; installing the pinned uv %s release artifact.\n' "$UV_VERSION"
     fi
 
-    download_and_run "$UV_INSTALL_URL" sh "uv"
+    install_uv_pinned
     add_known_bin_directories
     verify_uv
 }
@@ -1285,6 +1577,32 @@ parse_args() {
             --rtk)
                 enable_rtk=1
                 ;;
+            --fcc-ref)
+                shift
+                [ "$#" -gt 0 ] || fail "--fcc-ref requires a value."
+                fcc_ref=$1
+                [ -n "$fcc_ref" ] || fail "--fcc-ref requires a non-empty value."
+                ;;
+            --fcc-ref=*)
+                fcc_ref=${1#*=}
+                [ -n "$fcc_ref" ] || fail "--fcc-ref requires a non-empty value."
+                ;;
+            --checksums)
+                shift
+                [ "$#" -gt 0 ] || fail "--checksums requires a value."
+                checksums_file_cli=$1
+                [ -n "$checksums_file_cli" ] || fail "--checksums requires a non-empty value."
+                ;;
+            --checksums=*)
+                checksums_file_cli=${1#*=}
+                [ -n "$checksums_file_cli" ] || fail "--checksums requires a non-empty value."
+                ;;
+            --allow-unpinned)
+                allow_unpinned=1
+                ;;
+            --refresh-checksums)
+                refresh_mode=1
+                ;;
             --dry-run)
                 dry_run=1
                 ;;
@@ -1312,6 +1630,15 @@ validate_args() {
     fi
 }
 
+fcc_ref_is_full_sha() {
+    candidate=$1
+    [ ${#candidate} -eq 40 ] || return 1
+    case "$candidate" in
+        *[!0-9a-fA-F]*) return 1 ;;
+    esac
+    return 0
+}
+
 package_spec() {
     include_nim=$voice_nim
     include_local=$voice_local
@@ -1322,24 +1649,92 @@ package_spec() {
     fi
 
     if [ "$include_nim" -eq 1 ] && [ "$include_local" -eq 1 ]; then
-        printf 'free-claude-code[voice,voice_local] @ %s' "$REPO_ARCHIVE_URL"
+        printf 'free-claude-code[voice,voice_local] @ %s' "$fcc_source_url"
     elif [ "$include_nim" -eq 1 ]; then
-        printf 'free-claude-code[voice] @ %s' "$REPO_ARCHIVE_URL"
+        printf 'free-claude-code[voice] @ %s' "$fcc_source_url"
     elif [ "$include_local" -eq 1 ]; then
-        printf 'free-claude-code[voice_local] @ %s' "$REPO_ARCHIVE_URL"
+        printf 'free-claude-code[voice_local] @ %s' "$fcc_source_url"
     else
-        printf 'free-claude-code @ %s' "$REPO_ARCHIVE_URL"
+        printf 'free-claude-code @ %s' "$fcc_source_url"
     fi
+}
+
+clone_and_pin_fcc() {
+    if [ "$dry_run" -eq 1 ]; then
+        print_command git clone "$FCC_REPO_URL" "<temporary-checkout>"
+        print_command git -C "<temporary-checkout>" checkout --detach "$fcc_ref"
+        print_command git -C "<temporary-checkout>" rev-parse HEAD
+        if fcc_ref_is_full_sha "$fcc_ref"; then
+            printf '+ verify HEAD equals pinned commit %s\n' "$fcc_ref"
+        else
+            printf '+ warn: --fcc-ref %s is not a full 40-hex commit SHA (not cryptographically pinned)\n' "$fcc_ref"
+        fi
+        fcc_source_url="file://<temporary-checkout>"
+        return 0
+    fi
+
+    temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/fcc-src.XXXXXX") || fail "Unable to create a temporary Free Claude Code checkout directory."
+    fcc_checkout_dir="$temporary_dir/free-claude-code"
+    run git clone "$FCC_REPO_URL" "$fcc_checkout_dir"
+    run git -C "$fcc_checkout_dir" checkout --detach "$fcc_ref"
+
+    print_command git -C "$fcc_checkout_dir" rev-parse HEAD
+    head_commit=$(git -C "$fcc_checkout_dir" rev-parse HEAD) || fail "Could not resolve the checked-out Free Claude Code commit."
+
+    if fcc_ref_is_full_sha "$fcc_ref"; then
+        # git rev-parse emits lowercase hex; normalize both sides so an uppercase
+        # --fcc-ref still compares equal instead of confusingly failing closed.
+        fcc_ref_normalized=$(printf '%s' "$fcc_ref" | tr '[:upper:]' '[:lower:]')
+        head_commit_normalized=$(printf '%s' "$head_commit" | tr '[:upper:]' '[:lower:]')
+        if [ "$head_commit_normalized" != "$fcc_ref_normalized" ]; then
+            fail "Free Claude Code commit verification failed: expected $fcc_ref, checked out $head_commit."
+        fi
+        printf 'Pinned Free Claude Code to verified commit %s.\n' "$head_commit"
+    else
+        printf 'warning: --fcc-ref "%s" is not a full 40-hex commit SHA; resolved to %s but NOT cryptographically pinned.\n' "$fcc_ref" "$head_commit" >&2
+    fi
+
+    fcc_source_url="file://$fcc_checkout_dir"
+}
+
+# True (exit 0) when the installed uv accepts --locked on 'uv tool install'.
+uv_locked_supported() {
+    command -v uv >/dev/null 2>&1 || return 1
+    uv tool install --help 2>/dev/null | grep -q -- '--locked' || return 1
+    return 0
 }
 
 install_free_claude_code() {
     assert_no_fcc_processes_running
+    clone_and_pin_fcc
     spec=$(package_spec)
 
+    # Build the uv tool install argument list incrementally so optional flags are
+    # only added when the installed uv supports them.
+    set -- uv tool install --force --refresh-package free-claude-code --python "$PYTHON_VERSION"
+
+    # Pin FCC's full dependency closure (not just its own source tree) by making
+    # uv honor the checkout's uv.lock. --locked is added ONLY when the installed
+    # uv advertises it (capability check), so an older/newer uv that does not
+    # accept the flag never breaks the install. If a future uv rejects --locked
+    # for a "pkg[extras] @ file://<checkout>" requirement, remove it here and
+    # install from the checkout in project mode instead, e.g.:
+    #   (cd "$fcc_checkout_dir" && uv tool install --force --locked \
+    #        --python "$PYTHON_VERSION" ".[voice,voice_local]")
+    if uv_locked_supported; then
+        set -- "$@" --locked
+    fi
+
     if [ -n "$torch_backend" ]; then
-        run uv tool install --force --refresh-package free-claude-code --python "$PYTHON_VERSION" --torch-backend "$torch_backend" "$spec"
-    else
-        run uv tool install --force --refresh-package free-claude-code --python "$PYTHON_VERSION" "$spec"
+        set -- "$@" --torch-backend "$torch_backend"
+    fi
+
+    set -- "$@" "$spec"
+    run "$@"
+
+    if [ "$dry_run" -eq 0 ] && [ -n "$temporary_dir" ] && [ -d "$temporary_dir" ]; then
+        rm -rf "$temporary_dir"
+        temporary_dir=""
     fi
 }
 
@@ -1464,6 +1859,23 @@ PLIST
 
 parse_args "$@"
 validate_args
+resolve_script_dir
+resolve_checksums_file
+
+if [ "$refresh_mode" -eq 1 ]; then
+    step "Refreshing checksums (no code will be executed)"
+    require_command curl
+    require_command mktemp
+    require_sha256_tool
+    refresh_all_checksums
+    printf '\nReview each hash above against a trusted source, then paste the id=hash lines into %s.\n' "$checksums_file" >&2
+    exit 0
+fi
+
+if [ "$allow_unpinned" -eq 1 ]; then
+    print_unpinned_banner
+fi
+
 add_known_bin_directories
 if command -v cline >/dev/null 2>&1 || command -v npm >/dev/null 2>&1; then
     install_cline=1
@@ -1494,14 +1906,14 @@ if [ "$install_claude" -eq 1 ] || [ "$install_opencode" -eq 1 ] || [ "$install_h
 fi
 require_command sh
 require_command mktemp
-if [ "$enable_rtk" -eq 1 ] && ! command -v rtk >/dev/null 2>&1; then
+# Free Claude Code is always installed from a pinned git checkout, so the clone
+# path always runs and git is always required.
+require_command git
+# tar is only needed to extract the pinned uv and/or RTK release tarballs.
+if uv_needs_install || { [ "$enable_rtk" -eq 1 ] && ! command -v rtk >/dev/null 2>&1; }; then
     require_command tar
-    if [ "$dry_run" -eq 0 ] &&
-        ! command -v sha256sum >/dev/null 2>&1 &&
-        ! command -v shasum >/dev/null 2>&1; then
-        fail "RTK installation requires sha256sum or shasum for checksum verification."
-    fi
 fi
+require_sha256_tool
 
 ensure_selected_coding_agents
 configure_rtk_for_selected_agents

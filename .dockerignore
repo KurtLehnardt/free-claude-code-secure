@@ -1,0 +1,64 @@
+# Keep the Docker build context small and out of production images.
+# Exclude anything version control, test-only, or secret-shaped.
+
+# Version control / CI
+.git
+.github
+.gitignore
+
+# Claude / agent tooling working dirs
+.claude
+.claude/worktrees
+
+# Tests and non-production check suites (see CLAUDE.md "production files"
+# list -- tests/ and smoke/ are explicitly non-production).
+tests
+smoke
+e2e
+
+# Secrets and local env -- never bake these into an image layer.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+**/secrets/**
+scripts/install.checksums
+
+# Python build/test/tooling artifacts
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.ty_cache
+.coverage
+.coverage.*
+htmlcov
+dist
+build
+*.egg-info
+.venv
+venv
+
+# Editors / OS cruft
+.vscode
+.idea
+.DS_Store
+
+# Docs not needed inside the image (README.md IS needed -- hatchling's
+# build backend reads it via pyproject.toml's `readme` field -- so it is
+# intentionally NOT excluded here).
+ARCHITECTURE.md
+CONTRIBUTING.md
+AGENTS.md
+CLAUDE.md
+
+# This deliverable's own output directory, if the repo happens to contain a
+# copy of it -- avoid a self-referential context.
+out

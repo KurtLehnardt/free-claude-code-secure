@@ -1,0 +1,241 @@
+# Egress allowlist for fcc-server's outbound LLM/provider traffic.
+#
+# SOURCE OF TRUTH: every active (uncommented) hostname below was extracted
+# from the `default_base_url=...` constants actually assigned to each
+# ProviderDescriptor in
+#   src/free_claude_code/config/provider_catalog.py
+# (verified by reading that file directly, NOT the credential_url /
+# dashboard links it also carries -- those are where a human gets an API
+# key, not hosts the running process ever calls). Two hosts below were
+# found by tracing beyond provider_catalog.py into the modules that
+# actually issue HTTP requests, because provider_catalog.py alone does not
+# tell the whole story for every provider -- see the "found by call-site
+# tracing" notes inline.
+#
+# Format: one hostname per line, Squid `dstdomain` syntax.
+#   example.com   -> matches that exact host only
+#   .example.com  -> matches that host AND any subdomain of it
+# Lines starting with `#` and blank lines are ignored by Squid.
+#
+# This file is read by squid.conf via:
+#   acl allowed_domains dstdomain "/etc/squid/allowed-domains.txt"
+#
+# Edit this file to add/remove providers, then
+# `docker compose exec egress-proxy squid -k reconfigure` (or
+# `docker compose restart egress-proxy`). No squid.conf change is needed
+# for a plain hostname add/remove -- squid.conf only carries the two
+# regex ACLs noted below for hosts whose region/project segment varies.
+
+# --- NVIDIA NIM ---
+integrate.api.nvidia.com
+
+# --- Moonshot / Kimi ---
+api.moonshot.ai
+api.kimi.com
+
+# --- Wafer ---
+pass.wafer.ai
+
+# --- MiniMax ---
+api.minimax.io
+
+# --- DeepSeek ---
+api.deepseek.com
+
+# --- Fireworks ---
+api.fireworks.ai
+
+# --- Novita AI ---
+api.novita.ai
+
+# --- Cloudflare Workers AI ---
+api.cloudflare.com
+
+# --- OpenRouter ---
+openrouter.ai
+
+# --- Mistral (La Plateforme + Codestral IDE/personal, DISTINCT hosts) ---
+api.mistral.ai
+codestral.mistral.ai
+
+# --- Ollama Cloud (NOT local `ollama` -- that's http://localhost:11434,
+#     unreachable from this network by design; excluded below) ---
+ollama.com
+
+# --- OpenCode Zen + OpenCode Go (same host, different paths) ---
+opencode.ai
+
+# --- Vercel AI Gateway ---
+ai-gateway.vercel.sh
+
+# --- Hugging Face router ---
+router.huggingface.co
+
+# --- Cohere ---
+api.cohere.ai
+
+# --- GitHub Models ---
+models.github.ai
+
+# --- Z.ai (Coding Plan + API, same host, different paths) ---
+api.z.ai
+
+# --- Gemini (Google AI Studio OpenAI-compat layer; NOT Vertex) ---
+generativelanguage.googleapis.com
+
+# --- Google Vertex AI ---
+# providers/vertex/endpoint.py:vertex_service_endpoint() composes the real
+# runtime host from VERTEX_LOCATION:
+#   location == "global" -> the bare root below (found by call-site tracing;
+#                            provider_catalog.py's VERTEX_AI_API_ROOT alone
+#                            only covers this one case)
+#   any other region      -> "<region>-aiplatform.googleapis.com", which
+#                            needs the dstdom_regex ACL in squid.conf
+#                            because the region segment varies per operator
+aiplatform.googleapis.com
+
+# --- Groq ---
+# NOTE: console.groq.com (an earlier draft of this file) is Groq's
+# dashboard/sign-in page for creating an API key -- it is NOT where
+# requests go. The real API host per GROQ_DEFAULT_BASE is:
+api.groq.com
+
+# --- ClinePass ---
+api.cline.bot
+
+# --- Cerebras ---
+# NOTE: cloud.cerebras.ai (an earlier draft of this file) is Cerebras's
+# console/dashboard, not the API host. The real API host per
+# CEREBRAS_DEFAULT_BASE is:
+api.cerebras.ai
+
+# --- SambaNova ---
+api.sambanova.ai
+
+# --- Kilo.ai ---
+api.kilo.ai
+
+# --- OpenAI / ChatGPT (Codex connected-account subscription flow) ---
+# NOTE: this codebase's "openai" provider is the ChatGPT/Codex
+# connected-account flow (OAuth device/browser login), not a plain
+# OPENAI_API_KEY + api.openai.com integration -- there is no
+# OPENAI_BASE_URL setting in config/settings.py, and `api.openai.com`
+# never appears as an httpx/aiohttp request target anywhere in the
+# providers/openai_codex tree; it only shows up as a JWT claim-namespace
+# STRING ("https://api.openai.com/auth", ".../profile") embedded in
+# already-issued ID tokens, which is not a URL the process fetches. The
+# real request host is:
+chatgpt.com
+# ...and token refresh / device-code auth for that same connected-account
+# flow (found by call-site tracing into providers/openai_codex/login.py
+# OPENAI_AUTH_ISSUER, used by auth.py's _refresh_locked()/_exchange_code()
+# -- this runs during live serving whenever a Codex access token expires,
+# not just at one-time interactive login, so it belongs in the runtime
+# allowlist, not just a login-time bootstrap step):
+auth.openai.com
+
+# --- xAI (Grok) ---
+# NOTE: a bare `x.ai` entry (an earlier draft of this file) does NOT cover
+# the real API host below -- Squid's `dstdomain` without a leading dot is
+# an EXACT match only, and x.ai without a leading dot wouldn't even cover
+# subdomains if it had one. Per XAI_DEFAULT_BASE the real API host is:
+api.x.ai
+
+# --- QwenCloud Token Plan ---
+# Fixed literal host per QWENCLOUD_DEFAULT_BASE -- this descriptor has no
+# base_url_attr, so (unlike most providers here) it is NOT operator
+# base-URL-overridable today; the region segment is baked into the
+# default and does not vary at runtime.
+token-plan.ap-southeast-1.maas.aliyuncs.com
+
+# --- QwenCloud Coding Plan ---
+coding-intl.dashscope.aliyuncs.com
+
+# --- Together AI ---
+api.together.ai
+
+# --- DeepInfra ---
+api.deepinfra.com
+
+# --- SiliconFlow ---
+api.siliconflow.com
+
+# --- Nebius Token Factory ---
+api.tokenfactory.nebius.com
+
+# --- Chutes ---
+llm.chutes.ai
+
+# --- Featherless AI ---
+api.featherless.ai
+
+# --- TokenRouter ---
+api.tokenrouter.com
+
+# --- NaraRoute (Bynara) ---
+router.bynara.id
+
+# --- Agnes AI ---
+apihub.agnes-ai.com
+
+# --- ZenMux ---
+zenmux.ai
+
+# --- W&B Serverless Inference ---
+api.inference.wandb.ai
+
+# =============================================================================
+# Intentionally NOT listed above -- read before adding manually
+# =============================================================================
+#
+# amazon Bedrock (bedrock-mantle.<region>.api.aws): NOT a plain dstdomain
+# entry. BEDROCK_DEFAULT_BASE is "https://bedrock-mantle.us-east-1.api.aws/v1"
+# and bedrock_base_url IS operator-overridable (region-scoped, per
+# provider_catalog.py's own comment), so it's enforced via a dstdom_regex
+# ACL in squid.conf that matches any region, not just us-east-1:
+#   ^bedrock-mantle\.[a-z0-9-]+\.api\.aws$
+# (An earlier draft of this file/squid.conf incorrectly targeted
+# bedrock-runtime.*.amazonaws.com, which is AWS's native Bedrock Runtime
+# API, not the Bedrock Mantle OpenAI-compatible endpoint this codebase
+# actually calls. They are different hosts entirely.)
+#
+# Google Vertex regional host (<region>-aiplatform.googleapis.com): also
+# enforced via dstdom_regex in squid.conf, not a plain-text line, because
+# the region segment varies per operator (VERTEX_LOCATION setting):
+#   ^[a-z0-9-]+-aiplatform\.googleapis\.com$
+#
+# api.anthropic.com / api.openai.com: deliberately left OUT of the active
+# allowlist (not even as regex). Grepping the full source tree found no
+# httpx/aiohttp/openai-SDK call anywhere that targets either host as an
+# upstream URL:
+#   - Anthropic wire format is INBOUND ONLY in this codebase -- fcc-server
+#     receives requests in Anthropic's Messages API shape from local coding
+#     agents and translates them to whichever OpenAI-compatible backend is
+#     configured. There is no "Anthropic passthrough" provider in
+#     PROVIDER_CATALOG, so the proxy itself never calls out to Anthropic.
+#   - A plain api.openai.com/OPENAI_API_KEY integration is not a
+#     configuration this app has; the "openai" provider_id's
+#     default_base_url is chatgpt.com (see above), and api.openai.com only
+#     appears as a JWT claim-namespace string, never a fetch target.
+# If you extend this codebase with a direct Anthropic-passthrough or a
+# plain api.openai.com/OPENAI_API_KEY integration, add the relevant host
+# here at that time -- don't add it speculatively now.
+#
+# azure_openai: no default_base_url in the catalog at all (base_url_attr
+# only) -- it is 100% operator-supplied via AZURE_OPENAI_BASE_URL. Add
+# your specific Azure resource host (e.g. <resource>.openai.azure.com)
+# here yourself if you enable this provider; there is no sane project-wide
+# default to ship.
+#
+# lmstudio / llamacpp / ollama (local): default_base_url values are all
+# http://localhost:*. These are excluded on purpose -- they're not
+# internet egress targets, and this deployment's `internal: true` network
+# also makes them unreachable from inside the fcc-server container
+# regardless (see the DECISION/TRADE-OFF comment in docker-compose.yml).
+#
+# web_fetch / web_search model tools (lite.duckduckgo.com, and whatever
+# arbitrary URL a client asks web_fetch to retrieve): NOT LLM provider
+# traffic, deliberately not allowlisted here as a matter of scope. See the
+# docker-compose.yml DECISION/TRADE-OFF comment for the full story on why
+# these tools don't work under this topology at all today (it's not just
+# an allowlist gap).

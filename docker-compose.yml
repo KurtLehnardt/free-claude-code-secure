@@ -1,0 +1,299 @@
+# docker-compose.yml for fcc-server (free-claude-code proxy) — strict
+# isolation + egress-filtered deployment.
+#
+# Layout assumption: this file and Dockerfile/.dockerignore live at the
+# repository root (same directory as pyproject.toml/uv.lock/src/), and
+# egress/squid.conf + egress/allowed-domains.txt live in an `egress/`
+# subdirectory next to this file. Adjust `build.context` / the squid
+# volume paths below if you place them elsewhere.
+#
+# =============================================================================
+# FORBIDDEN HOST MOUNTS — READ BEFORE ADDING ANY `volumes:` ENTRY
+# =============================================================================
+# Do NOT bind-mount any of the following into ANY service in this file,
+# under any path, even read-only. Each one hands the container a real
+# credential store, cloud control-plane access, or the Docker socket
+# (which is equivalent to root on the host):
+#
+#   ~/.aws                      AWS credentials / SSO cache
+#   ~/.kube                     Kubernetes cluster credentials
+#   ~/.ssh                      SSH private keys
+#   ~/.config/gcloud            GCP application-default credentials
+#   ~/.docker                   Docker registry/config credentials
+#   /var/run/docker.sock        Docker Engine API socket (== host root)
+#   ~/.anthropic                Anthropic CLI/API credentials
+#   ~/.claude                   Claude Code credentials/session state
+#
+# fcc-server needs none of these. Secrets it DOES need (ANTHROPIC_AUTH_TOKEN,
+# <PROVIDER>_API_KEY, etc.) are injected as environment variables via
+# `env_file: .env` below — a file that is read once at container-create
+# time and never bind-mounted into the filesystem the running process can
+# browse.
+#
+# If you genuinely need to persist fcc-server's own state (e.g.
+# ~/.fcc/agent_workspace session history, or the OpenAI/Codex device-auth
+# cache under ~/.fcc/auth) across container recreation, use a *named*
+# Docker volume scoped to exactly that path — never a host bind mount of a
+# credential directory. See the commented-out example under the
+# `fcc-server` service below.
+# =============================================================================
+
+networks:
+  # fcc-server's only network. `internal: true` means Docker creates this
+  # bridge with NO default route to the outside world — no NAT/masquerade
+  # rule is installed for it, so containers on it cannot reach the internet
+  # (or the host's other networks) directly, full stop. This is IP/route
+  # level isolation, not hostname-based, which is exactly why the
+  # egress-proxy sidecar (Squid) exists — see egress/squid.conf for the
+  # full explanation of why FQDN allowlisting requires an L7 proxy and
+  # can't be done with Docker networking or iptables/eBPF alone.
+  #
+  # FLAG FOR VERIFICATION -- DNS on `internal: true`: whether name
+  # resolution itself still works from inside this network is genuinely
+  # Docker-version/host-config dependent and was NOT something this
+  # deliverable could confirm from an offline environment. Docker's
+  # embedded DNS server (127.0.0.11) runs as part of dockerd on the host,
+  # not inside the isolated network namespace, so in some configurations a
+  # container on an `internal` network can still get a successful DNS
+  # answer for a public hostname even though it has no route to actually
+  # connect to the resulting IP; in others resolution itself fails. Either
+  # way is fine for the security model here: nothing in this design
+  # depends on DNS being cut off. Enforcement is entirely the Squid
+  # dstdomain/CONNECT allowlist in egress/squid.conf, which works
+  # regardless of whether fcc-server's own DNS lookups succeed or fail
+  # (fcc-server never has to resolve the provider host itself for proxied
+  # HTTPS traffic -- it just CONNECTs to egress-proxy:3128, and
+  # egress-proxy does the resolving from the `egress-external` network).
+  # Do NOT additionally "fix" this by stripping DNS from the `internal`
+  # network (e.g. a custom bridge with no embedded resolver) as a
+  # belt-and-suspenders measure -- it adds no real security since the
+  # proxy is already the sole enforcement point, and it WOULD break
+  # web_fetch's direct getaddrinfo() calls (see the web tools note under
+  # the fcc-server service below), which resolve names on this same
+  # network for reasons unrelated to the LLM egress path.
+  internal:
+    internal: true
+  # Normal, internet-routable network. Only the egress-proxy sidecar is
+  # attached to it — it is the single, narrow chokepoint through which any
+  # traffic can leave this deployment.
+  egress-external: {}
+
+services:
+  fcc-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fcc-server:local
+
+    # Fixed non-root uid:gid — must match the ARG APP_UID/APP_GID baked
+    # into the image (Dockerfile default: 10001:10001).
+    user: "10001:10001"
+
+    # Hardened root filesystem: nothing on disk is writable except the
+    # explicit tmpfs mounts below. /home/fcc backs Path.home()/".fcc",
+    # which is where every writable path in this app lives (server log,
+    # messaging session state, OpenAI/Codex credential cache, lock files —
+    # see config/paths.py). /tmp covers stdlib/tempfile use by
+    # dependencies (uvicorn, httpx, etc.).
+    #
+    # /home/fcc sizing: config/logging_config.py configures loguru with
+    # rotation="50 MB" and retention=5 -- that's up to ~250-300MB of
+    # rotated server.log files alone before loguru prunes the oldest,
+    # plus messaging session state / the OpenAI-Codex credential cache on
+    # top. 32m (an earlier draft's size) would ENOSPC well before the
+    # first rotation. 400m gives real headroom above the ~300MB log
+    # ceiling; tune down only if you've separately confirmed a smaller
+    # LOG_FILE rotation policy via .env.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777,uid=10001,gid=10001
+      - /home/fcc:size=400m,mode=0700,uid=10001,gid=10001
+
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+
+    # Resource ceilings. Tune for your workload. mem_limit raised to 1g
+    # (from an earlier 512m draft) specifically because tmpfs pages count
+    # against the container's cgroup memory limit -- the 400m /home/fcc
+    # tmpfs above plus 64m /tmp alone can approach 512m under log-heavy
+    # load before the Python/uvicorn process itself uses a single byte,
+    # which would make the container OOM-kill itself via normal log
+    # rotation. 1g leaves headroom for both the full tmpfs allocation and
+    # the actual process working set.
+    pids_limit: 128
+    mem_limit: 1g
+    mem_reservation: 256m
+    cpus: "1.0"
+
+    # All secrets (ANTHROPIC_AUTH_TOKEN, <PROVIDER>_API_KEY / *_BASE_URL,
+    # PROXY_AUTH_ENABLED, LOG_RAW_* flags, MODEL, etc.) come from this file
+    # as environment variables — never inlined here, never baked into the
+    # image.
+    env_file:
+      - .env
+
+    environment:
+      # Route ALL outbound provider traffic through the Squid sidecar.
+      # httpx (and therefore the OpenAI SDK's internal httpx client) uses
+      # trust_env=True by default and nothing in this codebase overrides
+      # that, so standard HTTP(S)_PROXY/NO_PROXY env vars are honored
+      # automatically without any code change.
+      #
+      # CAVEAT: a handful of provider clients apply an explicit
+      # `config.proxy` (from a `<PROVIDER>_PROXY` value set in .env, e.g.
+      # OPENAI_PROXY) directly to their own httpx.AsyncClient. An explicit
+      # per-client proxy takes precedence over these environment
+      # variables and would send that provider's traffic to whatever
+      # OTHER proxy the operator configured instead of this sidecar,
+      # bypassing the allowlist below for that provider only. Leave
+      # `<PROVIDER>_PROXY` unset in .env unless that's genuinely what you
+      # want.
+      HTTPS_PROXY: "http://egress-proxy:3128"
+      HTTP_PROXY: "http://egress-proxy:3128"
+      # Loopback exemptions. Required so this app's own liveness probe
+      # (HEALTHCHECK hits http://127.0.0.1:8082/health via Python's
+      # urllib, which also honors these env vars) and the admin UI's
+      # "check local provider reachability" probe (which may legitimately
+      # target a user-configured localhost/self-hosted backend) don't get
+      # routed through — and rejected by — the egress proxy.
+      NO_PROXY: "localhost,127.0.0.1,::1"
+      no_proxy: "localhost,127.0.0.1,::1"
+
+    # =========================================================================
+    # DECISION/TRADE-OFF: the web_fetch and web_search model tools do NOT
+    # work under this topology, by design, and for two DIFFERENT reasons
+    # verified directly against api/web_tools/outbound.py:
+    #
+    # 1. web_search (_run_web_search) hits https://lite.duckduckgo.com/lite/
+    #    via httpx.AsyncClient(), which DOES honor HTTPS_PROXY (trust_env
+    #    defaults True, same as the provider clients above) -- so this
+    #    request correctly reaches egress-proxy, and is then correctly
+    #    DENIED there, because lite.duckduckgo.com is not an LLM provider
+    #    host and is deliberately not in egress/allowed-domains.txt. This
+    #    one IS just an allowlist gap: add lite.duckduckgo.com there (and
+    #    to squid.conf if you want it scoped tighter than the general
+    #    dstdomain list) if you want web_search to work.
+    #
+    # 2. web_fetch (_run_web_fetch) is structurally different and adding a
+    #    host to the allowlist will NOT fix it: it builds its own
+    #    aiohttp.TCPConnector with a custom DNS-pinned resolver
+    #    (_PinnedEgressStaticResolver) and connects directly to the
+    #    resolved IP; aiohttp.ClientSession() also defaults trust_env=False
+    #    (unlike httpx), so even without the custom connector it would not
+    #    read HTTP_PROXY/HTTPS_PROXY. The net effect: web_fetch traffic
+    #    never goes anywhere near egress-proxy -- it either succeeds
+    #    directly against the internet (if this container had a route,
+    #    which `internal: true` denies) or fails as unreachable. Re-enabling
+    #    it under this topology needs a CODE change (pass
+    #    trust_env=True and/or an explicit proxy= through to the
+    #    ClientSession/TCPConnector in outbound.py), not just a config
+    #    change here. Until/unless that's done, treat web_fetch as
+    #    non-functional in this deployment and don't rely on it.
+    # =========================================================================
+
+    # CAVEAT: this topology intentionally has NO route to a
+    # localhost/LAN-hosted model backend (Ollama, LM Studio, vLLM, etc.).
+    # NO_PROXY above only stops the loopback exemption from being routed
+    # THROUGH Squid — it does not create network reachability that
+    # `internal: true` removed. If you rely on a self-hosted OpenAI-compatible
+    # backend, add it as its own service on the `internal` network (not on
+    # `egress-external`), or accept that this container can no longer reach
+    # it and use a less restrictive network policy instead.
+    ports:
+      # Loopback-only publish. This is NOT 0.0.0.0:8082:8082 — the proxy
+      # is reachable only from processes on the Docker host itself
+      # (e.g. a local coding agent talking to http://127.0.0.1:8082),
+      # never from other machines on the LAN.
+      - "127.0.0.1:8082:8082"
+
+    networks:
+      - internal
+
+    depends_on:
+      egress-proxy:
+        condition: service_healthy
+
+    healthcheck:
+      # Redeclared from the Dockerfile only to shorten the interval for
+      # local iteration; remove this block to just inherit the image's
+      # built-in HEALTHCHECK.
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8082/health', timeout=2).read()"]
+      interval: 15s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+    # OPTIONAL, prefer to leave commented out entirely. If you need
+    # ~/.fcc state to survive `docker compose down`/recreation, uncomment
+    # BOTH lines below AND remove the matching `/home/fcc` tmpfs line
+    # above (a tmpfs mount and a volume mount can't both own the same
+    # path). This is a Docker-managed NAMED volume, not a host directory —
+    # it does not expose any host path into the container.
+    # volumes:
+    #   - fcc-home:/home/fcc
+
+  egress-proxy:
+    # Squid is not a Docker "Official Image"; `ubuntu/squid` is Canonical's
+    # verified-publisher build. Pinned to `:latest` here only because this
+    # deliverable was written offline and a specific current tag/digest
+    # could not be verified against the registry — before deploying,
+    # resolve `latest` once and re-pin to `ubuntu/squid@sha256:<digest>`
+    # so the proxy image can't change out from under you silently.
+    image: ubuntu/squid:latest
+
+    # NOT forcing a `user:` override here: unlike fcc-server (an image we
+    # fully control, built with a known uid), this is a third-party image
+    # whose internal user/permission layout for /var/spool/squid,
+    # /var/log/squid, and its pid file was not verified from this
+    # environment. Forcing an unverified uid could break the container in
+    # ways that are hard to diagnose. Verify the image's default user
+    # (`docker run --rm ubuntu/squid:latest id`) and pin `user:` explicitly
+    # once confirmed for your environment.
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    # tmpfs sizing: squid.conf sends access_log to stdout (stdio:/dev/stdout)
+    # specifically so it does NOT accumulate on this tmpfs -- otherwise a
+    # busy proxy's access log would grow unbounded until it hit whatever
+    # size cap we picked here and started failing writes. What's left
+    # under /var/log/squid is just cache.log (squid's own diagnostic log,
+    # small and effectively static) and pid files, so 16m is generous, not
+    # tight. /var/spool/squid stays small too since `cache deny all` in
+    # squid.conf means no response bodies are ever cached to disk.
+    read_only: true
+    tmpfs:
+      - /var/log/squid:size=16m
+      - /var/spool/squid:size=16m
+      - /run:size=8m
+
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: "0.5"
+
+    volumes:
+      - ./egress/squid.conf:/etc/squid/squid.conf:ro
+      - ./egress/allowed-domains.txt:/etc/squid/allowed-domains.txt:ro
+
+    networks:
+      - internal        # reachable by fcc-server as "egress-proxy:3128"
+      - egress-external  # its only route to the real internet
+
+    healthcheck:
+      test: ["CMD-SHELL", "squid -k check || exit 1"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+    # No `ports:` — never published to the host or to `internal` beyond
+    # what the `internal` network entry already grants. Only fcc-server
+    # (the only other member of `internal`) can reach it.
+
+# volumes:
+#   fcc-home:
+#     # Named volume for the optional ~/.fcc persistence example above.
+#     # Uncomment together with the matching `volumes:` line under
+#     # fcc-server and comment out its `/home/fcc` tmpfs entry.
