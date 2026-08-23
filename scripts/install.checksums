@@ -3,13 +3,16 @@
 # Format: <component-id>=<sha256>
 # Blank lines and lines starting with '#' are ignored.
 #
-# The installer (scripts/install.sh) is FAIL-CLOSED: any component whose value is
-# the literal token REPLACE_ME (or is missing entirely) will NOT be downloaded-
-# and-executed unless you explicitly pass --allow-unpinned. A fabricated hash is
-# worse than none, so unknown values are left as REPLACE_ME on purpose.
+# Both installers (scripts/install.sh and scripts/install.ps1) are FAIL-CLOSED:
+# any component whose value is the literal token REPLACE_ME (or is missing
+# entirely) will NOT be downloaded-and-executed unless you explicitly pass
+# --allow-unpinned (install.sh) / -AllowUnpinned (install.ps1). A fabricated hash
+# is worse than none, so unknown values are left as REPLACE_ME on purpose.
 #
 # To populate a REPLACE_ME value (trust-on-first-use, then pinned):
-#   1. Run on the target platform:  scripts/install.sh --refresh-checksums
+#   1. Run on the target platform:
+#        POSIX:    scripts/install.sh --refresh-checksums
+#        Windows:  scripts/install.ps1 -RefreshChecksums
 #      It downloads each installer/artifact, prints "id=<sha256>" lines to
 #      stdout, and exits. It NEVER executes downloaded code and NEVER edits this
 #      file.
@@ -34,6 +37,30 @@ hermes-installer=REPLACE_ME
 grok-installer=REPLACE_ME
 muse-installer=REPLACE_ME
 
+# --- Windows PowerShell vendor installer scripts (install.ps1; rolling, NO -----
+# --- stable upstream sha256). These are DISTINCT files from the .sh installer --
+# --- scripts above -- different URLs (*.ps1) and different bytes -- so they get -
+# --- their own component ids. Populate via `install.ps1 -RefreshChecksums` on ---
+# --- Windows, review against a trusted source, then paste. On Windows this ------
+# --- installer is FAIL-CLOSED like install.sh: a REPLACE_ME/missing hash --------
+# --- refuses to run that component unless -AllowUnpinned is passed. (Muse is not -
+# --- downloaded on Windows, and OpenCode uses a release archive below, so they --
+# --- have no *-installer-ps1 row.)
+claude-installer-ps1=REPLACE_ME
+codex-installer-ps1=REPLACE_ME
+pi-installer-ps1=REPLACE_ME
+hermes-installer-ps1=REPLACE_ME
+grok-installer-ps1=REPLACE_ME
+
+# --- OpenCode Windows release archive (install.ps1 downloads a GitHub release --
+# --- .zip rather than the opencode.ai/install script the .sh uses, so it is -----
+# --- keyed by the Windows asset name instead of the opencode-installer id -------
+# --- above). `latest` is a rolling source: re-pin via -RefreshChecksums --------
+# --- whenever you intentionally accept a newer OpenCode release. Only the row ---
+# --- for the architecture you install on needs to be populated.
+opencode-windows-x64-baseline=REPLACE_ME
+opencode-windows-arm64=REPLACE_ME
+
 # --- uv (pinned to versioned astral-sh/uv release tarballs, per platform) ------
 # Pinned uv version: 0.11.16 (>= the required minimum). Artifacts:
 #   https://github.com/astral-sh/uv/releases/download/0.11.16/uv-<target>.tar.gz
@@ -43,6 +70,8 @@ uv-0.11.16-x86_64-unknown-linux-gnu=REPLACE_ME
 uv-0.11.16-aarch64-unknown-linux-gnu=REPLACE_ME
 uv-0.11.16-x86_64-apple-darwin=REPLACE_ME
 uv-0.11.16-aarch64-apple-darwin=REPLACE_ME
+# Windows (install.ps1) pins the same uv version to the msvc release .zip.
+uv-0.11.16-x86_64-pc-windows-msvc=REPLACE_ME
 
 # --- RTK 0.44.2 (real, verified pinned hashes preserved from the shipped ------
 # --- installer; do NOT change these without independent re-verification) -------
@@ -50,3 +79,20 @@ rtk-0.44.2-x86_64-unknown-linux-musl=d94cc2a3e57fa534892b5235a726e7eeb7523f205a5
 rtk-0.44.2-aarch64-unknown-linux-gnu=5cd3f7fa2697faf9e5b77a10ce4e699006e02d4752d792f06550697eb4b8e8a9
 rtk-0.44.2-x86_64-apple-darwin=636f808db86b2cefab7db7dd9393da8b6e4721bb2ffaa0644e3ffa52d3420d81
 rtk-0.44.2-aarch64-apple-darwin=b7c2218eca538b54e63fa594a8ce58bd3716851b01b3b0dc026515323baf6393
+# Windows (install.ps1) target; real hash preserved from the shipped installer
+# (was an inline constant in install.ps1). Do NOT change without re-verification.
+rtk-0.44.2-x86_64-pc-windows-msvc=3a1e114edce9080f8a10663e9c87488363a82f14a5ca8aab2ad416817f89d47c
+
+# --- npm packages (Cline, DeepSeek Harness): pinned to an exact version -------
+# --- (never a floating "latest"), fetched via `npm pack` into an isolated -----
+# --- temp dir (a plain artifact download; no lifecycle scripts run for a ------
+# --- registry spec), sha256-verified against the row below, and only THEN -----
+# --- installed globally via `npm install -g <verified-tarball>`. Not ----------
+# --- platform-specific -- one row covers every OS/arch. Residual trust: this --
+# --- verifies the package ARTIFACT; it does not sandbox the package's own -----
+# --- preinstall/postinstall scripts, which still run with your user's --------
+# --- privileges during the final `npm install -g` step, same as any npm ------
+# --- package -- that is inherent to npm's package model, not a gap in this ----
+# --- installer's verification. -------------------------------------------------
+npm-cline-3.0.55=REPLACE_ME
+npm-dsh-0.1.0-rc.8=REPLACE_ME

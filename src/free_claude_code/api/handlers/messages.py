@@ -92,6 +92,7 @@ class MessagesHandler:
             token_counter=token_counter,
             generation_id=generation_id,
             log_raw_payloads=settings.log_raw_api_payloads,
+            outbound_secret_redaction=settings.outbound_secret_redaction,
         )
         self._message_intercepts: tuple[MessageIntercept, ...] = (
             self._intercept_web_server_tool,

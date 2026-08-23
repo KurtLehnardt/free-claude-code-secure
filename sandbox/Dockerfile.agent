@@ -1,0 +1,193 @@
+# syntax=docker/dockerfile:1
+#
+# fcc-agent container image
+# --------------------------
+# Multi-stage build for the SANDBOXED AGENT RUNNER's agent container: a
+# minimal, non-root image that has both the `fcc-*` launcher commands
+# (installed from this repo's own `free-claude-code` package) AND Claude
+# Code (`claude`) available, so `fcc-claude` can launch Claude Code pointed
+# at `fcc-server` over the internal Docker network (see
+# sandbox/docker-compose.yml).
+#
+# Verified against the real repo:
+#   - pyproject.toml [project.scripts]: fcc-claude =
+#     "free_claude_code.cli.launchers.claude:launch"
+#   - src/free_claude_code/cli/launchers/claude.py: `launch()` calls
+#     `preflight_proxy()` against `local_proxy_root_url(settings)` (built
+#     from Settings.host / Settings.port -- HOST/PORT env vars), then
+#     resolves the `claude` binary via `shutil.which("claude")`
+#     (cli/launchers/common.py) and spawns it with
+#     `build_claude_proxy_env()` (cli/claude_env.py), which sets
+#     ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN and STRIPS every
+#     `<PROVIDER>_API_KEY` / `ANTHROPIC_*` value already present in this
+#     process's own environment before the child ever sees it. That
+#     strip is defense in depth on top of this image's own design: this
+#     container is never given a provider key to begin with (see
+#     docker-compose.yml's FORBIDDEN HOST MOUNTS / secrets block).
+#   - claude.py's own `_INSTALL_HINT` string is the literal command used
+#     below to install Claude Code: `npm install -g @anthropic-ai/claude-code`.
+#   - security/hook_settings.py: `fcc-claude` registers the `fcc-hook-guard`
+#     PreToolUse hook by default (opt out with FCC_DISABLE_SECURITY_HOOKS=1,
+#     NOT done here -- keep it on as an extra layer under this container
+#     boundary; see hardening/README.md).
+#
+# Build context: this Dockerfile is built with the REPO ROOT as context
+# (see docker-compose.yml: `context: .., dockerfile: sandbox/Dockerfile.agent`)
+# because the `fcc-python` stage below needs pyproject.toml/uv.lock/src, the
+# same way the root Dockerfile's builder stage does. That also means the
+# repo root's existing `.dockerignore` governs this build's context (Docker
+# resolves an alternate-Dockerfile ignore file by the Dockerfile's BASENAME
+# at the CONTEXT ROOT, i.e. `<repo-root>/Dockerfile.agent.dockerignore` --
+# not a file under sandbox/ -- so a sandbox/.dockerignore would be inert
+# here; see sandbox/README.md for why one isn't shipped).
+#
+# DIGEST-PIN REMINDER (same posture as the root Dockerfile): both base
+# images below are pinned by tag, not by `@sha256` digest, because a
+# specific current digest could not be verified from this offline
+# environment and this project forbids fabricating hashes. Before a real
+# deploy, resolve each tag once (`docker pull <tag> && docker inspect
+# --format='{{index .RepoDigests 0}}' <tag>`) and replace the tag below with
+# `<image>@sha256:<digest>`.
+
+# -----------------------------------------------------------------------------
+# Stage 1: claude-code -- install the Claude Code CLI from npm in its own
+# stage so the final image only needs the resulting `node` binary + global
+# node_modules copied in, not npm's own cache/temp files or a full apt
+# toolchain. Node 22 is picked as a current LTS line at the time this was
+# written -- bump (and re-pin by digest) as newer LTS lines roll out.
+# -----------------------------------------------------------------------------
+FROM node:22-slim AS claude-code
+
+# ARG, not a fixed version, because Claude Code (like the other rolling
+# vendor installers this project documents in README.md's "Caveats and
+# limitations" section) publishes no stable upstream checksum to pin
+# against from an offline environment. Override at build time
+# (`--build-arg CLAUDE_CODE_VERSION=1.2.3`) once you have a version you want
+# to hold steady; "latest" here matches this project's existing documented
+# trust-on-first-use posture for this vendor, not a recommendation to leave
+# it unpinned in production.
+ARG CLAUDE_CODE_VERSION=latest
+RUN npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && npm cache clean --force
+
+# -----------------------------------------------------------------------------
+# Stage 2: fcc-python -- build the free-claude-code wheel into a venv, the
+# same way the root Dockerfile's builder stage does, so `fcc-claude` /
+# `fcc-hook-guard` are available. This pulls in the full dependency set
+# declared in pyproject.toml (fastapi/uvicorn/etc.) even though the launcher
+# path only imports a handful of light modules -- the project does not
+# currently split a launcher-only extra out of the single wheel, and this
+# stays consistent with how the root Dockerfile packages the same source.
+# Those extra installed-but-unimported dependencies sit inert in the venv;
+# they are not executed by anything this container runs.
+# -----------------------------------------------------------------------------
+FROM python:3.14-slim AS fcc-python
+
+ARG UV_VERSION=0.11.16
+COPY --from=ghcr.io/astral-sh/uv:${UV_VERSION} /uv /uvx /usr/local/bin/
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
+
+WORKDIR /build
+
+COPY pyproject.toml uv.lock README.md ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-install-project --no-dev --no-editable
+
+COPY src ./src
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-editable
+
+# No tiktoken cache warm-up here (unlike the root Dockerfile's builder
+# stage): `fcc-claude` never imports core/token_estimation.py -- only
+# fcc-server's request path does -- so there is nothing in this image that
+# would ever trigger that lazy download in the first place.
+
+# -----------------------------------------------------------------------------
+# Stage 3: runtime
+# -----------------------------------------------------------------------------
+FROM python:3.14-slim AS runtime
+
+# Fixed, non-root uid/gid, same numbering convention as the root Dockerfile's
+# fcc-server user (10001:10001) -- safe to reuse the same numbers here
+# because this is a wholly separate container/user-namespace with no shared
+# filesystem with fcc-server. Must match the `user:` override in
+# docker-compose.yml's fcc-agent service.
+ARG APP_UID=10001
+ARG APP_GID=10001
+
+# `git` is installed because the coding agent operates on a real project
+# checkout mounted at /work and Claude Code / typical dev workflows shell
+# out to git for status/diff/log. `ca-certificates` is deliberately NOT
+# installed: fcc-agent's only network peer is fcc-server over plain HTTP on
+# the internal Docker network (ANTHROPIC_BASE_URL=http://fcc-server:8082 --
+# see docker-compose.yml), and fcc-agent has no route to the public internet
+# at all (internal: true, no egress-external membership), so there is no
+# TLS connection this container ever legitimately makes that would need a
+# CA bundle. (Node.js also ships its own compiled-in Mozilla CA store
+# independent of the OS trust store, for what it's worth.)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Real login shell (/bin/bash), NOT /usr/sbin/nologin like fcc-server's user:
+# Claude Code's Bash tool spawns real shell commands inside this container,
+# so the user needs a usable shell. --no-create-home + a bare mkdir/chown
+# below: no dotfiles, shell-history files, or any other content is baked
+# into the home directory image layer -- it starts genuinely empty, and at
+# runtime docker-compose.yml overlays a tmpfs on it anyway (ephemeral,
+# discarded when the container exits).
+RUN groupadd --gid "${APP_GID}" agent \
+    && useradd --uid "${APP_UID}" --gid "${APP_GID}" \
+         --home-dir /home/agent --no-create-home --shell /bin/bash agent \
+    && mkdir -p /home/agent \
+    && chown "${APP_UID}:${APP_GID}" /home/agent
+
+# Prebuilt venv (fcc-claude, fcc-hook-guard, and every other fcc-* console
+# script + their dependencies).
+COPY --from=fcc-python --chown=${APP_UID}:${APP_GID} /opt/venv /opt/venv
+
+# Claude Code: copy just the installed global npm package + the node
+# runtime + the bin symlink npm created for it (`/usr/local/bin/claude` ->
+# `../lib/node_modules/@anthropic-ai/claude-code/cli.js`), not npm itself or
+# its cache -- nothing in this image ever runs `npm install` again at
+# runtime.
+COPY --from=claude-code /usr/local/bin/node /usr/local/bin/node
+COPY --from=claude-code /usr/local/bin/claude /usr/local/bin/claude
+COPY --from=claude-code /usr/local/lib/node_modules /usr/local/lib/node_modules
+
+# No shell-history persistence even if something spawns an interactive
+# shell inside this container (Claude Code's own Bash-tool invocations are
+# non-interactive `bash -c "..."` calls, which never read/write
+# ~/.bash_history to begin with -- this is defense in depth for the
+# genuinely-interactive case, e.g. a human `docker compose exec`'d in for
+# debugging). Belt-and-suspenders alongside fcc-hook-guard's own
+# shell-history-file read/write blocklist (hardening/README.md category 1).
+ENV PATH="/opt/venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    HOME=/home/agent \
+    HISTFILE=/dev/null \
+    HISTSIZE=0 \
+    HISTFILESIZE=0
+
+# /work is the fixed mount point for the user's target project directory
+# (see docker-compose.yml's fcc-agent.volumes) -- the ONLY host path this
+# container ever sees. WORKDIR here just sets Claude Code's starting cwd to
+# match; the directory itself is created by the bind mount at container
+# start, not baked into the image.
+WORKDIR /work
+
+USER ${APP_UID}:${APP_GID}
+
+# `fcc-claude` preflights fcc-server's /health and exits with a clear error
+# (see cli/launchers/claude.py) if it can't reach it yet, rather than
+# hanging -- docker-compose.yml's `depends_on: fcc-server: condition:
+# service_healthy` additionally waits for fcc-server's own HEALTHCHECK
+# before starting this container, so that path should be rare in normal
+# use. Arguments passed to `docker compose run --rm fcc-agent ...` are
+# forwarded to `claude` unchanged (fcc-claude reads sys.argv[1:]).
+CMD ["fcc-claude"]

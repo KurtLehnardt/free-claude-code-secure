@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 
 from free_claude_code.cli.local_http import with_local_proxy_bypass
+from free_claude_code.config.provider_catalog import provider_credential_env_names
 
 CLAUDE_CODE_AUTO_COMPACT_WINDOW = "190000"
 CLAUDE_BINARY_NAME = "claude"
@@ -17,12 +18,17 @@ def build_claude_proxy_env(
     """Return the canonical environment for Claude Code proxy sessions."""
 
     # Claude's aggregate traffic flag also suppresses gateway model discovery.
+    # Provider credentials are stripped too: only fcc-server calls providers,
+    # so the launched agent never needs them and must not be able to read one
+    # back out of its own environment (e.g. via a provider-steered tool call).
+    credential_env_names = provider_credential_env_names()
     env = with_local_proxy_bypass(
         {
             key: value
             for key, value in base_env.items()
             if not key.startswith("ANTHROPIC_")
             and key != "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+            and key not in credential_env_names
         },
         proxy_root_url=proxy_root_url,
     )

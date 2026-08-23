@@ -1,10 +1,14 @@
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from free_claude_code.api.admin_routes import (
+    _LOCAL_PROVIDER_EGRESS_BLOCKED_MESSAGE,
+    _check_local_provider,
+)
 from free_claude_code.application.connected_accounts import (
     ConnectedAccountLoginMode,
     ConnectedAccountState,
@@ -1612,6 +1616,111 @@ def test_admin_local_provider_failure_does_not_return_exception_text(
         assert "CREDENTIAL[unrecognized-format-987654321]" not in provider["message"]
         assert "RuntimeError" not in provider["message"]
         assert "error_type" not in provider
+
+
+def test_admin_local_provider_status_blocks_metadata_url(monkeypatch, tmp_path):
+    # A local-provider probe is config-driven (LM_STUDIO_BASE_URL), not
+    # request-driven, but a corrupted or malicious config value pointing at
+    # cloud metadata must not be blindly fetched (blind SSRF via reachability
+    # probe). The probe should reject it before ever opening an HTTP client.
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    monkeypatch.setenv("LM_STUDIO_BASE_URL", "http://169.254.169.254/latest/meta-data/")
+    app = create_test_app()
+
+    called_urls: list[str] = []
+
+    class RecordingAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url: str):
+            called_urls.append(url)
+            return httpx.Response(200, json={"data": []})
+
+    with patch(
+        "free_claude_code.api.admin_routes.httpx.AsyncClient", RecordingAsyncClient
+    ):
+        response = _local_client(app).get("/admin/api/providers/local-status")
+
+    assert response.status_code == 200
+    providers = {p["provider_id"]: p for p in response.json()["providers"]}
+    assert providers["lmstudio"]["status"] == "blocked"
+    assert providers["lmstudio"]["message"] == _LOCAL_PROVIDER_EGRESS_BLOCKED_MESSAGE
+    assert not any("169.254.169.254" in url for url in called_urls)
+    # Sanity: the guard is scoped to the unsafe target, not a wholesale
+    # bypass -- the other providers' default loopback URLs are still probed.
+    assert called_urls
+
+
+def test_admin_local_provider_status_blocks_non_loopback_private_address(
+    monkeypatch, tmp_path
+):
+    # Only the operator's own loopback server is in scope for this probe;
+    # an internal LAN address is treated the same as any other non-global,
+    # non-loopback SSRF target and rejected.
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://192.168.1.50:11434")
+    app = create_test_app()
+
+    with patch(
+        "free_claude_code.api.admin_routes.httpx.AsyncClient",
+        MagicMock(side_effect=RuntimeError("real network calls are mocked in tests")),
+    ):
+        response = _local_client(app).get("/admin/api/providers/local-status")
+
+    assert response.status_code == 200
+    providers = {p["provider_id"]: p for p in response.json()["providers"]}
+    assert providers["ollama"]["status"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_check_local_provider_blocks_target_without_opening_http_client():
+    mock_async_client = MagicMock()
+    with patch(
+        "free_claude_code.api.admin_routes.httpx.AsyncClient", mock_async_client
+    ):
+        result = await _check_local_provider(
+            "lmstudio", "http://169.254.169.254", "/latest/meta-data/"
+        )
+
+    assert result == {
+        "provider_id": "lmstudio",
+        "status": "blocked",
+        "label": "Blocked",
+        "base_url": "http://169.254.169.254",
+        "message": _LOCAL_PROVIDER_EGRESS_BLOCKED_MESSAGE,
+    }
+    mock_async_client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_check_local_provider_still_allows_loopback_target():
+    async def fake_get(url: str) -> httpx.Response:
+        return httpx.Response(200, json={"data": []})
+
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(side_effect=fake_get)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch(
+        "free_claude_code.api.admin_routes.httpx.AsyncClient",
+        MagicMock(return_value=mock_client),
+    ):
+        result = await _check_local_provider(
+            "lmstudio", "http://127.0.0.1:1234", "/models"
+        )
+
+    assert result["status"] == "reachable"
+    mock_client.get.assert_awaited_once_with("http://127.0.0.1:1234/models")
 
 
 @pytest.mark.parametrize(

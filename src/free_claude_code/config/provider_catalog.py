@@ -576,3 +576,19 @@ SUPPORTED_PROVIDER_IDS: tuple[str, ...] = tuple(PROVIDER_CATALOG.keys())
 
 if len(set(SUPPORTED_PROVIDER_IDS)) != len(SUPPORTED_PROVIDER_IDS):
     raise AssertionError("Duplicate provider ids in PROVIDER_CATALOG key order")
+
+
+def provider_credential_env_names() -> frozenset[str]:
+    """Return every provider credential env var name declared in the catalog.
+
+    Launchers strip these from a coding agent's child environment: only
+    ``fcc-server`` calls providers, so the launched agent subprocess never
+    needs a provider API key and must not be able to read one back out of
+    its own environment.
+    """
+
+    return frozenset(
+        descriptor.credential_env
+        for descriptor in PROVIDER_CATALOG.values()
+        if descriptor.credential_env is not None
+    )

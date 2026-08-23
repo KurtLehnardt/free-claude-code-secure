@@ -13,6 +13,7 @@ from typing import Never
 
 from free_claude_code.cli.local_http import with_local_proxy_bypass
 from free_claude_code.config.loader import get_settings
+from free_claude_code.config.provider_catalog import provider_credential_env_names
 from free_claude_code.config.server_urls import local_proxy_root_url
 from free_claude_code.core.json_types import JsonValue
 
@@ -165,10 +166,11 @@ def build_dsh_launcher_env(
 ) -> dict[str, str]:
     """Build a child-only DSH environment while preserving native state."""
 
+    credential_env_names = provider_credential_env_names()
     filtered = {
         key: value
         for key, value in base_env.items()
-        if not key.startswith(DSH_ENV_PREFIX)
+        if not key.startswith(DSH_ENV_PREFIX) and key not in credential_env_names
     }
     env = with_local_proxy_bypass(filtered, proxy_root_url=proxy_root_url)
     env[DSH_API_KEY_ENV] = auth_token

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-CHECK_ORDER="suppressions ruff-format ruff-check ty pytest playwright"
+CHECK_ORDER="suppressions ruff-format ruff-check ty pytest playwright deps-audit"
 
 dry_run=0
 only_checks=""
@@ -22,6 +22,7 @@ Checks (in order):
   ty             uv run ty check
   pytest         uv run pytest -v --tb=short
   playwright     Install Chromium and run deterministic Admin browser tests
+  deps-audit     Audit locked dependencies for known CVEs (uvx pip-audit)
 
 Options:
   --only ID                Run only the given check (repeatable)
@@ -70,7 +71,7 @@ run() {
 
 valid_check_id() {
     case "$1" in
-        suppressions | ruff-format | ruff-check | ty | pytest | playwright) return 0 ;;
+        suppressions | ruff-format | ruff-check | ty | pytest | playwright | deps-audit) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -165,6 +166,21 @@ run_playwright() {
         --full-page-screenshot --output=test-results
 }
 
+run_deps_audit() {
+    step "dependency vulnerability audit (pip-audit via uvx)"
+    if [ "$dry_run" -eq 0 ]; then
+        deps_audit_file=$(mktemp)
+    else
+        deps_audit_file="/tmp/fcc-deps-audit.txt"
+    fi
+    run uv export --locked --no-emit-workspace --no-header --no-annotate \
+        --output-file "$deps_audit_file"
+    run uvx pip-audit -r "$deps_audit_file" --no-deps
+    if [ "$dry_run" -eq 0 ]; then
+        rm -f "$deps_audit_file"
+    fi
+}
+
 run_check() {
     case "$1" in
         suppressions) run_suppressions ;;
@@ -173,6 +189,7 @@ run_check() {
         ty) run_ty ;;
         pytest) run_pytest ;;
         playwright) run_playwright ;;
+        deps-audit) run_deps_audit ;;
         *) fail "unknown check id: $1" ;;
     esac
 }
