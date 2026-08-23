@@ -12,6 +12,8 @@ from pydantic import (
     model_validator,
 )
 
+from free_claude_code.core.security import OutboundRedactionMode
+
 from .constants import HTTP_CONNECT_TIMEOUT_DEFAULT
 from .nim import NimSettings
 from .provider_catalog import (
@@ -20,12 +22,19 @@ from .provider_catalog import (
     SUPPORTED_PROVIDER_IDS,
     TOKENROUTER_DEFAULT_BASE,
 )
+from .proxy_auth import PUBLIC_DEFAULT_PROXY_AUTH_TOKEN
 from .reasoning import ReasoningPreference
 
 
 def _empty_to_none(value: object) -> object:
     if isinstance(value, str) and not value.strip():
         return None
+    return value
+
+
+def _normalize_redaction_mode(value: object) -> object:
+    if isinstance(value, str):
+        return value.strip().lower()
     return value
 
 
@@ -677,16 +686,43 @@ class Settings(BaseModel):
     )
 
     # ==================== Server ====================
-    host: NonEmptyString = Field(default="0.0.0.0", validation_alias="HOST")
+    # Default to loopback: a locally-run proxy must not be reachable from the LAN
+    # unless the operator deliberately opts in (see cli.entrypoints exposure gate).
+    host: NonEmptyString = Field(default="127.0.0.1", validation_alias="HOST")
     port: int = Field(default=8082, validation_alias="PORT")
     open_admin_browser: bool = Field(default=True, validation_alias="FCC_OPEN_BROWSER")
+    # Authentication is ON by default. The public-default token below is resolved to a
+    # generated, persisted secret by the loader (see config.proxy_auth); the shipped
+    # value is never used as a real credential.
     proxy_auth_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias="PROXY_AUTH_ENABLED",
     )
     proxy_auth_token: NonEmptyString = Field(
-        default="freecc",
+        default=PUBLIC_DEFAULT_PROXY_AUTH_TOKEN,
         validation_alias="ANTHROPIC_AUTH_TOKEN",
+    )
+    # Max accepted request body size in bytes (0 disables the cap).
+    max_request_body_bytes: int = Field(
+        default=100 * 1024 * 1024,
+        validation_alias="MAX_REQUEST_BODY_BYTES",
+    )
+    # Comma-separated extra Host-header values accepted by TrustedHostMiddleware,
+    # in addition to loopback names and the configured HOST.
+    trusted_hosts: OptionalNonEmptyString = Field(
+        default=None,
+        validation_alias="TRUSTED_HOSTS",
+    )
+    # Proxy-side outbound secret redaction applied to provider-bound request
+    # content before it leaves this proxy. "redact" (default) scrubs detected
+    # secrets and logs a count; "block" rejects a secret-bearing request; "off"
+    # passes content through unchanged.
+    outbound_secret_redaction: Annotated[
+        OutboundRedactionMode,
+        BeforeValidator(_normalize_redaction_mode),
+    ] = Field(
+        default=OutboundRedactionMode.REDACT,
+        validation_alias="OUTBOUND_SECRET_REDACTION",
     )
 
     @field_validator("max_message_log_entries_per_chat", mode="before")
@@ -694,6 +730,13 @@ class Settings(BaseModel):
     def parse_optional_log_cap(cls, v: object) -> object:
         if v == "" or v is None:
             return None
+        return v
+
+    @field_validator("max_request_body_bytes")
+    @classmethod
+    def validate_max_request_body_bytes(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("MAX_REQUEST_BODY_BYTES must be >= 0 (0 disables the cap)")
         return v
 
     @field_validator("log_level")

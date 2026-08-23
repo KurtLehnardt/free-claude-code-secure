@@ -12,8 +12,18 @@ def serve(argv: Sequence[str] | None = None) -> None:
         return
 
     # Keep the server composition root off metadata-only command paths.
-    from free_claude_code.cli.commands import serve as run_server
+    from free_claude_code.cli.commands import (
+        enforce_exposure_safety,
+        log_proxy_auth_token_location,
+    )
+    from free_claude_code.cli.commands import (
+        serve as run_server,
+    )
+    from free_claude_code.config.loader import get_settings
 
+    settings = get_settings()
+    enforce_exposure_safety(settings)
+    log_proxy_auth_token_location(settings)
     run_server()
 
 

@@ -26,7 +26,14 @@ def telegram_text_message_from_update(
 
     user_id = str(update.effective_user.id)
     chat_id = str(update.effective_chat.id)
-    if allowed_user_id and user_id != str(allowed_user_id).strip():
+    if not allowed_user_id:
+        logger.warning(
+            "Telegram inbound is disabled: ALLOWED_TELEGRAM_USER_ID is not set; "
+            "rejecting message from {}",
+            user_id,
+        )
+        return None
+    if user_id != str(allowed_user_id).strip():
         logger.warning("Unauthorized access attempt from {}", user_id)
         return None
 
@@ -92,7 +99,14 @@ def telegram_voice_request_from_update(
         return None
 
     user_id = str(effective_user.id)
-    if allowed_user_id and user_id != str(allowed_user_id).strip():
+    if not allowed_user_id:
+        logger.warning(
+            "Telegram inbound is disabled: ALLOWED_TELEGRAM_USER_ID is not set; "
+            "rejecting voice message from {}",
+            user_id,
+        )
+        return None
+    if user_id != str(allowed_user_id).strip():
         logger.warning("Unauthorized voice access attempt from {}", user_id)
         return None
 

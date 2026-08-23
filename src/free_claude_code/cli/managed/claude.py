@@ -1,7 +1,7 @@
 """Managed Claude Code task command, environment, and stdout parsing."""
 
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from loguru import logger
@@ -11,6 +11,7 @@ from free_claude_code.cli.claude_env import (
     build_claude_proxy_env,
 )
 from free_claude_code.core.json_types import JsonObject, JsonValue
+from free_claude_code.security.hook_settings import security_settings_args
 
 MANAGED_CLAUDE_MODEL_TIER = "fable"
 
@@ -67,6 +68,7 @@ def build_managed_claude_invocation(
         session_id=request.session_id,
         fork_session=request.fork_session,
         allowed_dirs=config.allowed_dirs,
+        security_args=security_settings_args(base_env),
     )
     resume_session_id = (
         request.session_id
@@ -120,8 +122,15 @@ def build_managed_claude_command(
     session_id: str | None,
     fork_session: bool,
     allowed_dirs: list[str],
+    security_args: Sequence[str] = (),
 ) -> list[str]:
-    """Return the Claude Code stream-json command for a managed task."""
+    """Return the Claude Code stream-json command for a managed task.
+
+    ``security_args`` (``["--settings", <json>]`` or empty) registers the
+    default-on FCC ``PreToolUse`` guard. This path runs Claude Code with
+    ``--dangerously-skip-permissions``, so the guard is the only pre-execution
+    check on provider-steered tool calls.
+    """
 
     if session_id and not session_id.startswith("pending_"):
         cmd = [
@@ -153,6 +162,9 @@ def build_managed_claude_command(
             "--dangerously-skip-permissions",
             "--verbose",
         ]
+
+    if security_args:
+        cmd.extend(security_args)
 
     for directory in allowed_dirs:
         cmd.extend(["--add-dir", directory])

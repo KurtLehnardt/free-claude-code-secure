@@ -12,6 +12,10 @@ from free_claude_code.core.interprocess_lock import InterprocessFileLock
 from .env_files import ANTHROPIC_AUTH_TOKEN_ENV, dotenv_values_from_file
 from .env_migrations import consolidate_managed_config, settings_env_keys
 from .paths import config_lock_path, managed_env_path
+from .proxy_auth import (
+    is_public_default_proxy_token,
+    load_or_create_proxy_auth_token,
+)
 from .settings import Settings
 
 
@@ -49,7 +53,27 @@ def resolve_settings_snapshot(
 
     managed_path = managed_env_path()
     managed = dotenv_values_from_file(managed_path) if managed_path.is_file() else {}
-    return compose_settings_snapshot(managed, process)
+    snapshot = compose_settings_snapshot(managed, process)
+    return _with_resolved_proxy_auth_token(snapshot)
+
+
+def _with_resolved_proxy_auth_token(snapshot: SettingsSnapshot) -> SettingsSnapshot:
+    """Replace an unset/public-default proxy token with a persisted secret.
+
+    This runs only on the runtime funnel (``get_settings`` / admin config load), so
+    ``fcc-server`` and every launcher observe the same generated token with zero
+    manual setup. The pure ``compose_settings_snapshot`` contract is unchanged.
+    """
+
+    settings = snapshot.settings
+    if not is_public_default_proxy_token(settings.proxy_auth_token):
+        return snapshot
+
+    token = load_or_create_proxy_auth_token()
+    resolved = settings.model_copy(update={"proxy_auth_token": token})
+    # Preserve the original provenance: the token is a persisted machine secret, not a
+    # user-authored managed value, so the Admin apply/preserve flow leaves it alone.
+    return SettingsSnapshot(settings=resolved, sources=snapshot.sources)
 
 
 def compose_settings_snapshot(
