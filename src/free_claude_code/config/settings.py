@@ -12,6 +12,8 @@ from pydantic import (
     model_validator,
 )
 
+from free_claude_code.core.security import OutboundRedactionMode
+
 from .constants import HTTP_CONNECT_TIMEOUT_DEFAULT
 from .nim import NimSettings
 from .provider_catalog import (
@@ -27,6 +29,12 @@ from .reasoning import ReasoningPreference
 def _empty_to_none(value: object) -> object:
     if isinstance(value, str) and not value.strip():
         return None
+    return value
+
+
+def _normalize_redaction_mode(value: object) -> object:
+    if isinstance(value, str):
+        return value.strip().lower()
     return value
 
 
@@ -704,6 +712,17 @@ class Settings(BaseModel):
     trusted_hosts: OptionalNonEmptyString = Field(
         default=None,
         validation_alias="TRUSTED_HOSTS",
+    )
+    # Proxy-side outbound secret redaction applied to provider-bound request
+    # content before it leaves this proxy. "redact" (default) scrubs detected
+    # secrets and logs a count; "block" rejects a secret-bearing request; "off"
+    # passes content through unchanged.
+    outbound_secret_redaction: Annotated[
+        OutboundRedactionMode,
+        BeforeValidator(_normalize_redaction_mode),
+    ] = Field(
+        default=OutboundRedactionMode.REDACT,
+        validation_alias="OUTBOUND_SECRET_REDACTION",
     )
 
     @field_validator("max_message_log_entries_per_chat", mode="before")

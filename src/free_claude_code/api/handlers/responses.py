@@ -51,6 +51,7 @@ class ResponsesHandler:
             progress_timeout_seconds=settings.provider_progress_timeout,
             generation_id=generation_id,
             log_raw_payloads=settings.log_raw_api_payloads,
+            outbound_secret_redaction=settings.outbound_secret_redaction,
         )
 
     async def create(
