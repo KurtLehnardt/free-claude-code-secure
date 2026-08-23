@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "free-claude-code"
-version = "5.13.0"
+version = "6.4.1"
 description = "Local proxy connecting coding agents to OpenAI-compatible AI providers"
 readme = "README.md"
 requires-python = ">=3.14.0"
@@ -12,6 +12,7 @@ dependencies = [
     "fastapi[standard]>=0.141.1",
     "uvicorn>=0.52.1",
     "httpx[socks]>=0.28.1",
+    "httpx2[socks]>=2.7.0,<3",  # starlette 1.x TestClient imports httpx2; required so its deprecation warning doesn't become fatal under filterwarnings=error
     "markdown-it-py>=4.2.0",
     "pydantic>=2.13.4",
     "python-dotenv>=1.2.2",
@@ -24,12 +25,24 @@ dependencies = [
     "jsonschema>=4.25.0",
     "google-auth[requests]>=2.56.3",
     "requests[socks]>=2.34.2",
+    # Explicit floors for transitive deps with known-CVE versions otherwise resolvable
+    # under fastapi[standard]/httpx/requests/google-auth's own looser constraints.
+    # Verified against OSV.dev on 2026-08-21; each floor is the first release with zero
+    # open advisories for the CVEs found against the previously-locked version.
+    "starlette>=1.6.0",  # fastapi 0.141.1 only requires >=0.46.0; raises the floor past GHSA-86qp/jp82/wqp7/x746/82w8
+    "python-multipart>=0.0.32",  # fixes 6 DoS/param-smuggling advisories (GHSA-5rvq/6jv3/mj87/pp6c/v9pg/vffw)
+    "urllib3>=2.7.0",  # fixes GHSA-mf9v (decompression-bomb bypass), GHSA-qccp (cross-origin header leak)
+    "cryptography>=50.0.0",  # fixes GHSA-g6cj (PKCS#7 Bleichenbacher oracle)
+    "idna>=3.19",  # fixes GHSA-65pc (idna.encode() DoS bypass)
+    "click>=8.3.3",  # fixes CVE-2026-7246 (PYSEC-2026-2132); transitive via fastapi[standard]/uvicorn/typer
+    "pygments>=2.20.0",  # fixes CVE-2026-4539 ReDoS (GHSA-5239-wwwm-4pmq); transitive via rich/typer
     "pystray>=0.19.5; sys_platform == 'win32' or sys_platform == 'darwin'",
     "Pillow>=12.0.0; sys_platform == 'win32' or sys_platform == 'darwin'",
 ]
 
 [project.scripts]
 fcc-server = "free_claude_code.cli.entrypoints:serve"
+fcc-hook-guard = "free_claude_code.security.hook_guard:main"
 fcc-claude = "free_claude_code.cli.launchers.claude:launch"
 fcc-codex = "free_claude_code.cli.launchers.codex:launch"
 fcc-pi = "free_claude_code.cli.launchers.pi:launch"
@@ -97,15 +110,76 @@ select = [
     "SIM",  # flake8-simplify (simplifiable code patterns)
     "PERF", # Perflint (performance anti-patterns)
     "RUF",  # Ruff-specific rules
+    "S",    # flake8-bandit (security: hardcoded binds/secrets, subprocess, weak crypto, ...)
 ]
 ignore = [
     "E501",  # line too long — enforced by the formatter instead
     "B008",  # FastAPI Depends() in argument defaults is intentional
     "RUF006",  # fire-and-forget tasks intentionally not awaited
+    "S101",  # assert usage — used throughout tests and for internal invariants, not noise
 ]
 
 [tool.ruff.lint.isort]
 known-first-party = ["free_claude_code", "smoke"]
+
+[tool.ruff.lint.per-file-ignores]
+# S105 (hardcoded-password-string): each hit below is a constant/variable *name* that
+# merely contains "token"/"secret" (e.g. `ANTHROPIC_AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN"`,
+# `MASKED_SECRET = "********"`) — no embedded credential value. Verified by reading each
+# line; see the ci/deps security-scan report for the full audit.
+"src/free_claude_code/cli/launchers/codex.py" = ["S105"]
+"src/free_claude_code/config/admin/values.py" = ["S105"]
+"src/free_claude_code/config/env_files.py" = ["S105"]
+"src/free_claude_code/config/env_migrations.py" = ["S105"]
+"src/free_claude_code/core/anthropic/tools.py" = ["S105"]
+"src/free_claude_code/providers/openai_chat/output_cap.py" = ["S105"]
+# S104 (hardcoded-bind-all-interfaces): this file only *downgrades* an already-configured
+# 0.0.0.0/::/[::] host to 127.0.0.1 for human-facing URL display — it never binds a socket.
+# The real S104 finding (the HOST default itself, config/settings.py) is intentionally left
+# UN-ignored so it keeps failing this check until the server-hardening workstream changes
+# the default away from 0.0.0.0.
+"src/free_claude_code/config/server_urls.py" = ["S104"]
+# S310 (url-open audit): both call sites open the app's own locally configured proxy root
+# URL (CLI preflight / model-catalog self-connect), not attacker-controlled input.
+# common.py also gets S603 here (subprocess call, see the S603/S607 block below) since
+# TOML per-file-ignores keys must be unique.
+"src/free_claude_code/cli/launchers/common.py" = ["S310", "S603"]
+"src/free_claude_code/cli/launchers/model_catalog.py" = ["S310"]
+# S311 (non-cryptographic random): random.uniform() used for retry-backoff jitter only.
+"src/free_claude_code/providers/admission.py" = ["S311"]
+# S324 (insecure hashlib): sha1 truncated purely as a short dedup suffix for a tool name,
+# not used for anything security-sensitive.
+"src/free_claude_code/core/openai_responses/tools.py" = ["S324"]
+# S603/S607 (subprocess call / partial executable path): these launchers exist specifically
+# to spawn the coding-agent CLI binaries (claude/codex/cline/dsh/grok/hermes/muse/opencode/pi)
+# the user has installed — intentional, expected subprocess usage.
+"src/free_claude_code/cli/launchers/cline.py" = ["S603"]
+"src/free_claude_code/cli/launchers/dsh.py" = ["S603"]
+"src/free_claude_code/cli/launchers/grok.py" = ["S603"]
+"src/free_claude_code/cli/launchers/hermes.py" = ["S603"]
+"src/free_claude_code/cli/launchers/muse.py" = ["S603"]
+"src/free_claude_code/cli/launchers/opencode.py" = ["S603"]
+"src/free_claude_code/cli/launchers/pi.py" = ["S603"]
+"src/free_claude_code/cli/process_registry.py" = ["S603", "S607"]
+# S110/S112 (try-except-pass / try-except-continue): reviewed line by line — each is an
+# intentional fallback/skip inside a best-effort parsing or cleanup loop (e.g. falling back
+# from response.json() to response.text(), skipping one malformed message id out of a batch),
+# not a silently-swallowed security-relevant error. NOTE: these were not independently vetted
+# by the devsecops report that scoped this ruleset addition (only S101/S104/S105/S310/S311/
+# S324/S603/S607 were); this determination was made by the ci/deps workstream while wiring
+# this config and should be double-checked by whoever owns these modules.
+"src/free_claude_code/core/diagnostics.py" = ["S110"]
+"src/free_claude_code/messaging/limiter.py" = ["S110"]
+"src/free_claude_code/messaging/platforms/telegram_io.py" = ["S112"]
+"src/free_claude_code/messaging/transcript/renderer.py" = ["S112"]
+"src/free_claude_code/messaging/voice.py" = ["S112"]
+# flake8-bandit (S) targets shipped application code. Test/smoke/e2e code
+# legitimately uses hardcoded fixtures (S105/S106/S107), subprocess spawns
+# (S603/S607), temp paths (S108), and asserts — so the S ruleset is excluded
+# there to keep security-lint signal focused on src/.
+"tests/**/*.py" = ["S"]
+"smoke/**/*.py" = ["S"]
+"e2e/**/*.py" = ["S"]
 
 [tool.ruff.format]
 quote-style = "double"

@@ -8,6 +8,7 @@ from loguru import logger
 from free_claude_code.application.errors import UnknownProviderError
 from free_claude_code.application.ports import ProviderPort, RequestRuntimeLease
 from free_claude_code.config.provider_catalog import PROVIDER_CATALOG
+from free_claude_code.config.proxy_auth import is_public_default_proxy_token
 from free_claude_code.config.settings import Settings
 
 from .ports import ApiServices
@@ -49,7 +50,13 @@ def require_proxy_auth(
     settings: Settings = Depends(get_settings),
 ) -> None:
     """Require the configured proxy token as HTTP bearer authorization."""
-    if not settings.proxy_auth_enabled:
+    # A publicly-known default token is not a real credential: enforcing it provides
+    # no security. Real deployments never reach here with the default because the
+    # loader replaces it with a generated secret (config.proxy_auth); this guard keeps
+    # a bare (unresolved) config from presenting a false sense of protection.
+    if not settings.proxy_auth_enabled or is_public_default_proxy_token(
+        settings.proxy_auth_token
+    ):
         return
 
     authorization = request.headers.get("authorization")

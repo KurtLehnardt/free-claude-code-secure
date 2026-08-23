@@ -16,7 +16,8 @@ $CheckOrder = @(
     "ruff-check",
     "ty",
     "pytest",
-    "playwright"
+    "playwright",
+    "deps-audit"
 )
 
 function Show-Usage {
@@ -34,6 +35,7 @@ Checks (in order):
   ty             uv run ty check
   pytest         uv run pytest -v --tb=short
   playwright     Install Chromium and run deterministic Admin browser tests
+  deps-audit     Audit locked dependencies for known CVEs (uvx pip-audit)
 
 Options:
   -Only ID              Run only the given check (repeatable)
@@ -177,6 +179,26 @@ function Invoke-PlaywrightCheck {
     )
 }
 
+function Invoke-DepsAuditCheck {
+    Write-Step "dependency vulnerability audit (pip-audit via uvx)"
+
+    if ($DryRun) {
+        $depsAuditFile = Join-Path ([System.IO.Path]::GetTempPath()) "fcc-deps-audit.txt"
+    } else {
+        $depsAuditFile = [System.IO.Path]::GetTempFileName()
+    }
+
+    Invoke-CiCommand -FilePath "uv" -Arguments @(
+        "export", "--locked", "--no-emit-workspace", "--no-header", "--no-annotate",
+        "--output-file", $depsAuditFile
+    )
+    Invoke-CiCommand -FilePath "uvx" -Arguments @("pip-audit", "-r", $depsAuditFile, "--no-deps")
+
+    if (-not $DryRun) {
+        Remove-Item -Path $depsAuditFile -ErrorAction SilentlyContinue
+    }
+}
+
 function Invoke-Check {
     param([string] $CheckId)
 
@@ -187,6 +209,7 @@ function Invoke-Check {
         "ty" { Invoke-TyCheck }
         "pytest" { Invoke-PytestCheck }
         "playwright" { Invoke-PlaywrightCheck }
+        "deps-audit" { Invoke-DepsAuditCheck }
         default { throw "unknown check id: $CheckId" }
     }
 }

@@ -1,5 +1,6 @@
 """Local admin UI routes and APIs."""
 
+import asyncio
 import ipaddress
 from collections.abc import Mapping
 from pathlib import Path
@@ -27,6 +28,11 @@ from free_claude_code.core.json_types import JsonObject, JsonValue
 
 from .dependencies import get_services
 from .ports import ApiServices
+from .web_tools.egress import (
+    WebFetchEgressPolicy,
+    WebFetchEgressViolation,
+    enforce_web_fetch_egress,
+)
 
 router = APIRouter()
 
@@ -38,6 +44,23 @@ LOCAL_PROVIDER_PATHS = {
 }
 _LOCAL_PROVIDER_CHECK_FAILURE_MESSAGE = (
     "Could not connect. Verify the URL and that the local provider is running."
+)
+_LOCAL_PROVIDER_EGRESS_BLOCKED_MESSAGE = (
+    "This URL is not allowed for local-provider probing "
+    "(only the operator's own localhost server is permitted)."
+)
+# The local-provider reachability probe is config-driven (LM_STUDIO_BASE_URL /
+# LLAMACPP_BASE_URL / OLLAMA_BASE_URL), not request-driven, but a corrupted or
+# malicious config value could still point it at an internal/cloud-metadata
+# address. Route it through the same SSRF guard as web_fetch. Unlike the
+# general web_fetch policy, loopback stays allowed here (allow_loopback_targets)
+# because the probe's whole purpose is reaching an operator's own localhost
+# LM Studio / llama.cpp / Ollama server; every other private/link-local/CGNAT
+# address (including 169.254.169.254 cloud metadata) is still rejected.
+_LOCAL_PROVIDER_PROBE_EGRESS = WebFetchEgressPolicy(
+    allow_private_network_targets=False,
+    allowed_schemes=frozenset({"http", "https"}),
+    allow_loopback_targets=True,
 )
 
 
@@ -72,11 +95,48 @@ def _origin_is_local(origin: str | None) -> bool:
     return _is_loopback_host(parsed.hostname)
 
 
+# httpx/Starlette TestClient sentinel Host; not internet-routable, so a rebinding page
+# cannot cause the browser to send it (see admin DNS-rebinding hardening).
+_TESTCLIENT_HOST = "testserver"
+# Headers set only by an intermediary proxy. A direct local admin client (browser on
+# localhost, or an FCC launcher) never sends these, so their presence means the request
+# was forwarded and the transport peer cannot be trusted for the loopback decision.
+_FORWARDED_HEADERS = ("x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded")
+
+
+def _host_header_hostname(host_header: str) -> str:
+    host = host_header.strip()
+    if host.startswith("["):
+        end = host.find("]")
+        return host if end == -1 else host[: end + 1]
+    return host.split(":", 1)[0]
+
+
+def _admin_host_header_is_local(host_header: str | None) -> bool:
+    if not host_header:
+        return False
+    hostname = _host_header_hostname(host_header)
+    if hostname.lower() == _TESTCLIENT_HOST:
+        return True
+    return _is_loopback_host(hostname)
+
+
 def require_loopback_admin(request: Request) -> None:
-    """Allow admin access only from the local machine."""
+    """Allow admin access only from the local machine.
+
+    Defends the admin surface against (a) LAN reachability, (b) DNS rebinding via a
+    Host-header allowlist, and (c) ``X-Forwarded-For`` spoofing when the proxy is
+    deployed behind a trusting reverse proxy (``FORWARDED_ALLOW_IPS=*``).
+    """
+
+    if any(header in request.headers for header in _FORWARDED_HEADERS):
+        raise HTTPException(status_code=403, detail="Admin UI is local-only")
 
     client_host = request.client.host if request.client else None
     if not _is_loopback_host(client_host):
+        raise HTTPException(status_code=403, detail="Admin UI is local-only")
+
+    if not _admin_host_header_is_local(request.headers.get("host")):
         raise HTTPException(status_code=403, detail="Admin UI is local-only")
 
     origin = request.headers.get("origin")
@@ -286,6 +346,23 @@ async def _check_local_provider(
         }
 
     url = f"{clean_url}{path}"
+    try:
+        await asyncio.to_thread(
+            enforce_web_fetch_egress, url, _LOCAL_PROVIDER_PROBE_EGRESS
+        )
+    except WebFetchEgressViolation:
+        logger.warning(
+            "Admin local provider check rejected by egress guard: provider={}",
+            provider_id,
+        )
+        return {
+            "provider_id": provider_id,
+            "status": "blocked",
+            "label": "Blocked",
+            "base_url": base_url,
+            "message": _LOCAL_PROVIDER_EGRESS_BLOCKED_MESSAGE,
+        }
+
     try:
         async with httpx.AsyncClient(timeout=1.5) as client:
             response = await client.get(url)

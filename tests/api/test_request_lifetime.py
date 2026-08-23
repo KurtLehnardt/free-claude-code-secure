@@ -514,6 +514,10 @@ async def _disconnect_real_app(
     body = json.dumps(payload).encode()
     scope = _http_scope(path)
     scope["headers"] = [
+        # A real ASGI server always populates Host; supply a loopback-allowlisted
+        # value so TrustedHostMiddleware admits the request (it rejects a missing
+        # Host with 400 before the request reaches the provider).
+        (b"host", b"testserver"),
         (b"content-type", b"application/json"),
         (b"content-length", str(len(body)).encode()),
     ]

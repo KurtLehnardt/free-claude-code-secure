@@ -1,0 +1,293 @@
+# sandbox/docker-compose.yml -- SANDBOXED AGENT RUNNER
+#
+# Three services: fcc-server (holds provider keys), egress-proxy (Squid
+# allowlist for fcc-server's outbound provider traffic), and fcc-agent (runs
+# Claude Code via `fcc-claude`, with NO provider keys and NO internet route).
+# This file is self-contained: it builds fcc-server from the repo root
+# Dockerfile and reuses the repo root's egress/ config, but does not require
+# the root docker-compose.yml to be running -- `docker compose -f
+# sandbox/docker-compose.yml ...` stands up its own independent stack.
+#
+# THREAT MODEL: the coding agent's model traffic is steered by whichever LLM
+# provider you configure -- including untrusted/low-cost third-party
+# providers whose weights and output you do not control. Anything that
+# provider returns can be interpreted by Claude Code as instructions,
+# including tool calls. fcc-agent (this file's whole point) makes sure that
+# even a FULLY compromised agent process -- one following a malicious
+# provider's instructions with no human in the loop -- cannot reach host
+# secrets or exfiltrate data to an arbitrary host, because it structurally
+# has neither. See sandbox/README.md for the full threat model and honest
+# limits (in particular: this does not stop the configured provider from
+# seeing whatever the agent legitimately sends it as part of normal use).
+#
+# =============================================================================
+# FORBIDDEN HOST MOUNTS -- READ BEFORE ADDING ANY `volumes:` ENTRY TO ANY
+# SERVICE BELOW, ESPECIALLY fcc-agent
+# =============================================================================
+# Do NOT bind-mount any of the following into ANY service in this file,
+# under any path, even read-only:
+#
+#   ~/.ssh                       SSH private keys
+#   ~/.aws                       AWS credentials / SSO cache
+#   ~/.kube                      Kubernetes cluster credentials
+#   ~/.config/gcloud             GCP application-default credentials
+#   ~/.docker                    Docker registry/config credentials
+#   /var/run/docker.sock         Docker Engine API socket (== host root)
+#   ~/.anthropic                 Anthropic CLI/API credentials
+#   ~/.claude                    Claude Code's OWN host credentials/session
+#                                 state (not this container's ephemeral
+#                                 tmpfs ~/.claude -- your real one)
+#   ~/.fcc                       fcc-server/launcher state, incl.
+#                                 proxy_auth_token and any cached provider
+#                                 auth on the HOST
+#   ~/.zshrc / ~/.bashrc / etc.  shell startup files (may source secrets)
+#   ~/.netrc, ~/.npmrc, ~/.pypirc, ~/.git-credentials
+#
+# fcc-agent in particular is designed to need NONE of these: its only
+# outbound peer is fcc-server, reached over the `internal` Docker network by
+# service name (see the fcc-agent service below), and its only secret is a
+# proxy bearer token (ANTHROPIC_AUTH_TOKEN) that grants access to fcc-server
+# ONLY -- never a provider credential. The only host path fcc-agent ever
+# sees is the project directory you explicitly mount at /work.
+#
+# fcc-server needs none of the above either. Provider secrets
+# (ANTHROPIC_AUTH_TOKEN, <PROVIDER>_API_KEY, etc.) come from `env_file:
+# sandbox/.env` below -- read once at container-create time, never
+# bind-mounted as a browsable file.
+# =============================================================================
+
+networks:
+  # No default route to the internet (see egress/squid.conf's header comment
+  # for why FQDN allowlisting needs an L7 proxy and can't be done with
+  # Docker networking / iptables alone). Both fcc-server and fcc-agent sit
+  # here; fcc-agent is ONLY here -- it is never a member of
+  # `egress-external`, which is the actual isolation control that gives it
+  # no direct internet route.
+  internal:
+    internal: true
+  # Real, internet-routable network. Only egress-proxy is attached to it --
+  # the single chokepoint through which fcc-server's provider traffic can
+  # leave this stack. fcc-agent must NEVER be added to this network.
+  egress-external: {}
+
+services:
+  fcc-server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: fcc-server:sandbox
+
+    user: "10001:10001"
+
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777,uid=10001,gid=10001
+      - /home/fcc:size=400m,mode=0700,uid=10001,gid=10001
+
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+
+    pids_limit: 128
+    mem_limit: 1g
+    mem_reservation: 256m
+    cpus: "1.0"
+
+    # THIS is the only place provider API keys exist in this whole stack.
+    # Create sandbox/.env from ../.env.example (`cp ../.env.example .env`
+    # from inside sandbox/) and fill in only the provider keys you actually
+    # use -- see sandbox/README.md.
+    env_file:
+      - .env
+
+    environment:
+      # Force these regardless of whatever HOST/PORT sandbox/.env carries
+      # over from .env.example's default (HOST=127.0.0.1). `environment:`
+      # entries override `env_file:` entries for the same key in Compose, so
+      # this wins even if the user's .env still has the loopback-only
+      # default. It MUST win: fcc-agent reaches this container as
+      # "fcc-server:8082" over the `internal` bridge network, which only
+      # works if the process inside actually binds 0.0.0.0 -- a process
+      # bound to its own 127.0.0.1 is unreachable from a different
+      # container's network namespace even on a shared bridge. (The root
+      # Dockerfile already bakes ENV HOST=0.0.0.0 as its own image default
+      # for the same reason; this just guarantees a plain `.env` copy can't
+      # quietly undo that here.)
+      HOST: "0.0.0.0"
+      PORT: "8082"
+      # No browser to open inside a container; avoid the wasted attempt.
+      FCC_OPEN_BROWSER: "false"
+      # Route ALL outbound provider traffic through the Squid sidecar (see
+      # the root docker-compose.yml for the full httpx trust_env explanation
+      # and the <PROVIDER>_PROXY override caveat -- same applies here).
+      HTTPS_PROXY: "http://egress-proxy:3128"
+      HTTP_PROXY: "http://egress-proxy:3128"
+      NO_PROXY: "localhost,127.0.0.1,::1"
+      no_proxy: "localhost,127.0.0.1,::1"
+
+    # No `ports:` published to the host in this sandboxed stack, on purpose:
+    # nobody outside this compose project needs to reach fcc-server directly
+    # -- only fcc-agent does, over the `internal` network. This keeps
+    # nothing bound to the host loopback at all. If you want the Admin UI
+    # from your host browser too, add back a loopback-only publish exactly
+    # like the root docker-compose.yml does:
+    #   ports:
+    #     - "127.0.0.1:8082:8082"
+
+    networks:
+      - internal
+
+    depends_on:
+      egress-proxy:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8082/health', timeout=2).read()"]
+      interval: 15s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+  egress-proxy:
+    # Same image + same "not a Docker Official Image, verify/pin before
+    # deploying" caveat as the root docker-compose.yml's egress-proxy.
+    image: ubuntu/squid:latest
+
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+
+    read_only: true
+    tmpfs:
+      - /var/log/squid:size=16m
+      - /var/spool/squid:size=16m
+      - /run:size=8m
+
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: "0.5"
+
+    # Reuses the repo root's already-reviewed egress/ config verbatim --
+    # this stack does not fork or duplicate the allowlist. Add/remove a
+    # provider host in ../egress/allowed-domains.txt (not here) and reload
+    # with `docker compose -f sandbox/docker-compose.yml exec egress-proxy
+    # squid -k reconfigure`.
+    volumes:
+      - ../egress/squid.conf:/etc/squid/squid.conf:ro
+      - ../egress/allowed-domains.txt:/etc/squid/allowed-domains.txt:ro
+
+    networks:
+      - internal        # reachable by fcc-server as "egress-proxy:3128"
+      - egress-external  # its only route to the real internet
+
+    healthcheck:
+      test: ["CMD-SHELL", "squid -k check || exit 1"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+    # No `ports:` -- never published to the host or reachable beyond what
+    # the `internal` network membership already grants fcc-server.
+
+  fcc-agent:
+    build:
+      # Repo root as build context (needed for the fcc-python stage's
+      # pyproject.toml/uv.lock/src), Dockerfile itself lives under
+      # sandbox/. See sandbox/Dockerfile.agent's header comment and
+      # sandbox/README.md for why this also means the repo root's existing
+      # .dockerignore applies here (not a sandbox/-local one).
+      context: ..
+      dockerfile: sandbox/Dockerfile.agent
+    image: fcc-agent:sandbox
+
+    user: "10001:10001"
+
+    # Interactive by default: `docker compose run --rm fcc-agent` should
+    # behave like running `fcc-claude` directly in a terminal.
+    stdin_open: true
+    tty: true
+
+    read_only: true
+    tmpfs:
+      # /tmp: general scratch space (stdlib tempfile, node, etc.).
+      # /home/agent: backs Claude Code's own config/session state (~/.claude)
+      # AND fcc's own ~/.fcc (proxy-auth-token bookkeeping -- see
+      # config/paths.py). Ephemeral: discarded on container exit, on
+      # purpose. There is deliberately no named volume here -- persisting
+      # session history is a convenience/cost tradeoff, not a security
+      # requirement, and NOT worth the risk of it silently becoming a place
+      # secrets end up cached; see sandbox/README.md "Honest limits".
+      - /tmp:size=128m,mode=1777,uid=10001,gid=10001
+      - /home/agent:size=256m,mode=0700,uid=10001,gid=10001
+
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+
+    # Higher than fcc-server's limits: this container runs arbitrary
+    # project-local dev commands (test runners, linters, build tools) as
+    # part of normal agent operation, not just a lean proxy process. Tune
+    # for your workload/host.
+    pids_limit: 256
+    mem_limit: 2g
+    mem_reservation: 512m
+    cpus: "2.0"
+
+    # ONLY the project directory you're pointing the agent at -- nothing
+    # else. Set FCC_PROJECT_DIR to an ABSOLUTE host path before running
+    # (e.g. `FCC_PROJECT_DIR=$(pwd) docker compose -f
+    # sandbox/docker-compose.yml run --rm fcc-agent` from inside that
+    # project). Compose fails fast with a clear error if it's unset, rather
+    # than silently mounting the wrong thing.
+    volumes:
+      - ${FCC_PROJECT_DIR:?Set FCC_PROJECT_DIR to the absolute host path of the project directory the agent should work on, e.g. FCC_PROJECT_DIR=$(pwd)}:/work:rw
+
+    # DELIBERATELY NO env_file HERE. fcc-server above uses `env_file: .env`
+    # and therefore sees every provider key in sandbox/.env. fcc-agent does
+    # NOT use `env_file:` at all -- only the one variable named explicitly
+    # below is pulled out of sandbox/.env (Compose auto-loads a `.env` file
+    # next to this compose file purely for `${...}` interpolation, which is
+    # a SEPARATE mechanism from a service's `env_file:` key). That is what
+    # keeps every <PROVIDER>_API_KEY in sandbox/.env out of this container
+    # even though both services read from the same file on disk. Do not
+    # "simplify" this to `env_file: .env` -- that would hand every provider
+    # key in the file straight to the sandboxed agent and defeat the whole
+    # point of this deployment.
+    environment:
+      # fcc-server's compose service name, resolved over the `internal`
+      # network's embedded DNS -- see cli/launchers/claude.py /
+      # config/server_urls.py: `local_proxy_root_url(settings)` builds
+      # "http://{HOST}:{PORT}" from these two Settings fields, and
+      # `fcc-claude` preflights + sets ANTHROPIC_BASE_URL to exactly that
+      # URL before spawning `claude`.
+      HOST: "fcc-server"
+      PORT: "8082"
+      # Must be the SAME value fcc-server resolves to, or auth fails with
+      # 401. Both sides must set a real (non-"freecc") value in sandbox/.env
+      # for this to hold -- see sandbox/README.md "Setup" and
+      # config/proxy_auth.py's is_public_default_proxy_token(): an unset or
+      # placeholder token makes EACH process generate and persist its own
+      # random token independently, and the two containers' tokens would
+      # then never match. Compose refuses to start this service at all if
+      # the variable is unset/empty, rather than silently falling through
+      # to that placeholder.
+      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:?Set a real, random ANTHROPIC_AUTH_TOKEN in sandbox/.env (not the "freecc" placeholder) -- see sandbox/README.md}
+
+    # ONLY on `internal` -- never add `egress-external` here. This is the
+    # control that gives fcc-agent no direct internet route at all: it can
+    # reach fcc-server (and, if you ever add one, another same-network
+    # sidecar) but nothing else, full stop, regardless of what a compromised
+    # agent process tries to connect to.
+    networks:
+      - internal
+
+    depends_on:
+      fcc-server:
+        condition: service_healthy
+
+    # No `ports:` -- fcc-agent is a client, never a server; nothing needs to
+    # reach it.
