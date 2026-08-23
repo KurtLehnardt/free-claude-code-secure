@@ -12,6 +12,7 @@ from typing import Never
 
 from free_claude_code.cli.local_http import with_local_proxy_bypass
 from free_claude_code.config.loader import get_settings
+from free_claude_code.config.provider_catalog import provider_credential_env_names
 from free_claude_code.config.server_urls import local_proxy_root_url
 
 from .cline_config import CLINE_PROVIDER_ID, ClineConfig, build_cline_config
@@ -254,7 +255,11 @@ def build_cline_launcher_env(
 ) -> dict[str, str]:
     """Build the child-only Cline environment while preserving native state."""
 
-    env = with_local_proxy_bypass(base_env, proxy_root_url=proxy_root_url)
+    credential_env_names = provider_credential_env_names()
+    filtered = {
+        key: value for key, value in base_env.items() if key not in credential_env_names
+    }
+    env = with_local_proxy_bypass(filtered, proxy_root_url=proxy_root_url)
     env["CLINE_PROVIDER_SETTINGS_PATH"] = str(providers_path)
     env["CLINE_SESSION_BACKEND_MODE"] = "local"
     return env

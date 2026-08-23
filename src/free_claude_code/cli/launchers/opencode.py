@@ -12,6 +12,7 @@ from typing import Never
 
 from free_claude_code.cli.local_http import with_local_proxy_bypass
 from free_claude_code.config.loader import get_settings
+from free_claude_code.config.provider_catalog import provider_credential_env_names
 from free_claude_code.config.server_urls import local_proxy_root_url
 from free_claude_code.core.json_types import JsonValue
 
@@ -154,11 +155,14 @@ def build_opencode_launcher_env(
 ) -> dict[str, str]:
     """Build an isolated child environment without persisting FCC credentials."""
 
+    credential_env_names = provider_credential_env_names()
     env = with_local_proxy_bypass(
         {
             key: value
             for key, value in base_env.items()
-            if not key.startswith("FCC_OPENCODE_") and key not in _PROCESS_CONFIG_KEYS
+            if not key.startswith("FCC_OPENCODE_")
+            and key not in _PROCESS_CONFIG_KEYS
+            and key not in credential_env_names
         },
         proxy_root_url=proxy_root_url,
     )

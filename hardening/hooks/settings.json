@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Read|Edit|Write|WebFetch|WebSearch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/hardening/hooks/fcc-guard.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -768,11 +768,13 @@ def test_install_sh_fresh_install_is_verified(posix_harness: PosixHarness) -> No
     # Free Claude Code is installed from a pinned git checkout via a file:// uv
     # requirement -- never the unpinned main.zip archive.
     assert any(
-        call.startswith("git:clone https://github.com/alishahryar1/free-claude-code")
+        call.startswith(
+            "git:clone https://github.com/KurtLehnardt/free-claude-code-secure"
+        )
         for call in calls
     )
     assert any(
-        "checkout --detach 9372cfa5e2dc48fe1adf9743473f3763b3b08592" in call
+        "checkout --detach 88b99da8931222268b1e8c5b55acac5d44f66711" in call
         for call in calls
     )
     assert any(call.endswith("rev-parse HEAD") for call in calls)
@@ -3108,8 +3110,8 @@ def test_installers_use_native_clients_and_single_python_selection() -> None:
         # Free Claude Code is installed from a git checkout pinned to an exact
         # commit and referenced via file://, never the unpinned main.zip archive.
         assert "main.zip" not in text
-        assert "https://github.com/alishahryar1/free-claude-code" in text
-        assert "9372cfa5e2dc48fe1adf9743473f3763b3b08592" in text
+        assert "https://github.com/KurtLehnardt/free-claude-code-secure" in text
+        assert "88b99da8931222268b1e8c5b55acac5d44f66711" in text
         assert "checkout --detach" in text
         assert "rev-parse" in text
         assert "python install" not in text

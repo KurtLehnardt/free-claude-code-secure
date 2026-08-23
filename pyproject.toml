@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "free-claude-code"
-version = "6.1.3"
+version = "6.2.0"
 description = "Local proxy connecting coding agents to OpenAI-compatible AI providers"
 readme = "README.md"
 requires-python = ">=3.14.0"
@@ -34,6 +34,8 @@ dependencies = [
     "urllib3>=2.7.0",  # fixes GHSA-mf9v (decompression-bomb bypass), GHSA-qccp (cross-origin header leak)
     "cryptography>=50.0.0",  # fixes GHSA-g6cj (PKCS#7 Bleichenbacher oracle)
     "idna>=3.19",  # fixes GHSA-65pc (idna.encode() DoS bypass)
+    "click>=8.3.3",  # fixes CVE-2026-7246 (PYSEC-2026-2132); transitive via fastapi[standard]/uvicorn/typer
+    "pygments>=2.20.0",  # fixes CVE-2026-4539 ReDoS (GHSA-5239-wwwm-4pmq); transitive via rich/typer
     "pystray>=0.19.5; sys_platform == 'win32' or sys_platform == 'darwin'",
     "Pillow>=12.0.0; sys_platform == 'win32' or sys_platform == 'darwin'",
 ]

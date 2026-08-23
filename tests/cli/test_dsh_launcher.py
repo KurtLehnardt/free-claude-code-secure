@@ -337,6 +337,8 @@ def test_dsh_child_environment_preserves_native_state_and_replaces_owned_keys() 
         base_env={
             "PATH": "keep",
             "DSH_HOME": "native-home",
+            # A provider credential must never reach the launched DSH child:
+            # only fcc-server calls providers, so DSH does not need one.
             "DEEPSEEK_API_KEY": "native-key",
             "FCC_DSH_API_KEY": "stale",
             "FCC_DSH_OTHER": "stale",
@@ -347,7 +349,7 @@ def test_dsh_child_environment_preserves_native_state_and_replaces_owned_keys() 
 
     assert env["PATH"] == "keep"
     assert env["DSH_HOME"] == "native-home"
-    assert env["DEEPSEEK_API_KEY"] == "native-key"
+    assert "DEEPSEEK_API_KEY" not in env
     assert env["FCC_DSH_API_KEY"] == "proxy-token"
     assert "FCC_DSH_OTHER" not in env
     assert env["DSH_TELEMETRY_DISABLED"] == "1"
