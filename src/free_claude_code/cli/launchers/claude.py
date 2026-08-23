@@ -2,7 +2,7 @@
 
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from free_claude_code.cli.claude_env import (
     CLAUDE_BINARY_NAME,
@@ -10,6 +10,7 @@ from free_claude_code.cli.claude_env import (
 )
 from free_claude_code.config.loader import get_settings
 from free_claude_code.config.server_urls import local_proxy_root_url
+from free_claude_code.security.hook_settings import security_settings_args
 
 from .common import preflight_proxy, resolve_client_binary, run_client_process
 
@@ -38,7 +39,9 @@ def launch(argv: Sequence[str] | None = None) -> None:
     )
     args = list(sys.argv[1:] if argv is None else argv)
     run_client_process(
-        command=build_claude_launcher_command(binary_path=binary_path, argv=args),
+        command=build_claude_launcher_command(
+            binary_path=binary_path, argv=args, env=os.environ
+        ),
         env=build_claude_proxy_env(
             proxy_root_url=proxy_root_url,
             auth_token=settings.proxy_auth_token,
@@ -57,8 +60,13 @@ def claude_binary_name() -> str:
 
 
 def build_claude_launcher_command(
-    *, binary_path: str, argv: Sequence[str]
+    *, binary_path: str, argv: Sequence[str], env: Mapping[str, str]
 ) -> list[str]:
-    """Return the Claude wrapper command without changing user arguments."""
+    """Return the Claude command, registering the security hook by default.
 
-    return [binary_path, *argv]
+    The ``--settings`` JSON merges the FCC ``PreToolUse`` guard into the user's
+    own Claude Code configuration; user arguments are appended unchanged. Set
+    ``FCC_DISABLE_SECURITY_HOOKS=1`` to omit it.
+    """
+
+    return [binary_path, *security_settings_args(env), *argv]

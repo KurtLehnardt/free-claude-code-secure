@@ -79,6 +79,7 @@ from .usage import (
     is_stream_usage_rejection,
     request_stream_usage,
     usage_int,
+    usage_nested_int,
 )
 
 OpenAIAsyncCredentialProvider = Callable[[], Awaitable[str]]
@@ -321,8 +322,26 @@ class OpenAIChatProvider(BaseProvider):
         return {}
 
     def _anthropic_usage_fields(self, usage_info: Any) -> dict[str, int]:
-        """Return provider-specific Anthropic usage fields for final SSE usage."""
-        return {}
+        """Map the OpenAI-compatible ``prompt_tokens_details.cached_tokens``
+        field (used by providers that do automatic prefix caching) onto
+        Anthropic cache usage. Returns ``{}`` when upstream did not report
+        caching, leaving behavior unchanged for providers that don't cache.
+        """
+        prompt_tokens = usage_int(usage_info, "prompt_tokens")
+        cached_tokens = usage_nested_int(
+            usage_info, "prompt_tokens_details", "cached_tokens"
+        )
+        if (
+            prompt_tokens is None
+            or cached_tokens is None
+            or cached_tokens < 0
+            or cached_tokens > prompt_tokens
+        ):
+            return {}
+        return {
+            "input_tokens": prompt_tokens - cached_tokens,
+            "cache_read_input_tokens": cached_tokens,
+        }
 
     async def _create_stream(
         self,

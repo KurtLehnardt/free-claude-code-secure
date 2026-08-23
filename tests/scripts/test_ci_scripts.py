@@ -62,7 +62,8 @@ def test_ci_sh_runs_ci_checks_in_order() -> None:
     legacy_future_import = "from __future__ import " + "annotations"
 
     assert (
-        'CHECK_ORDER="suppressions ruff-format ruff-check ty pytest playwright"' in text
+        'CHECK_ORDER="suppressions ruff-format ruff-check ty pytest playwright'
+        ' deps-audit"' in text
     )
     assert "grep -rE" in text
     assert "Fix the underlying type/import issue instead" in text
@@ -77,6 +78,12 @@ def test_ci_sh_runs_ci_checks_in_order() -> None:
     assert "uv run pytest -v --tb=short" in text
     assert "uv run playwright install chromium" in text
     assert "uv run pytest e2e -n 0" in text
+    # deps-audit is the final check and runs after playwright, auditing the
+    # locked dependency set for known CVEs via uvx pip-audit.
+    assert "run_deps_audit" in text
+    assert "uvx pip-audit" in text
+    assert "uv export --locked" in text
+    assert text.index("run_playwright()") < text.index("run_deps_audit()")
     assert "--only" in text
     assert "--skip" in text
     assert "--dry-run" in text
@@ -223,6 +230,10 @@ def test_ci_ps1_runs_ci_checks_in_order() -> None:
     assert '"ty"' in text
     assert '"pytest"' in text
     assert '"playwright"' in text
+    assert '"deps-audit"' in text
+    assert "Invoke-DepsAuditCheck" in text
+    assert "pip-audit" in text
+    assert text.index('"playwright"') < text.index('"deps-audit"')
     assert "Select-String -Pattern" in text
     assert "Fix the underlying type/import issue instead" in text
     assert legacy_future_import in text

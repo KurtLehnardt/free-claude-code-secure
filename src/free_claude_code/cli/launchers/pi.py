@@ -8,6 +8,7 @@ from pathlib import Path
 
 from free_claude_code.cli.local_http import with_local_proxy_bypass
 from free_claude_code.config.loader import get_settings
+from free_claude_code.config.provider_catalog import provider_credential_env_names
 from free_claude_code.config.server_urls import local_proxy_root_url
 
 from .common import preflight_proxy, resolve_client_binary, run_client_process
@@ -114,11 +115,12 @@ def build_pi_launcher_env(
 ) -> dict[str, str]:
     """Return a Pi environment containing only FCC-owned proxy variables."""
 
+    credential_env_names = provider_credential_env_names()
     env = with_local_proxy_bypass(
         {
             key: value
             for key, value in base_env.items()
-            if not key.startswith("FCC_PI_")
+            if not key.startswith("FCC_PI_") and key not in credential_env_names
         },
         proxy_root_url=proxy_root_url,
     )

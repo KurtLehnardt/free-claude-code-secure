@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from free_claude_code.cli.local_http import with_local_proxy_bypass
 from free_claude_code.config.loader import get_settings
 from free_claude_code.config.paths import codex_model_catalog_path
+from free_claude_code.config.provider_catalog import provider_credential_env_names
 from free_claude_code.config.server_urls import local_proxy_root_url
 from free_claude_code.config.settings import Settings
 
@@ -117,11 +118,14 @@ def build_codex_launcher_env(
 ) -> dict[str, str]:
     """Return a Codex environment that targets the local proxy provider."""
 
+    credential_env_names = provider_credential_env_names()
     env = with_local_proxy_bypass(
         {
             key: value
             for key, value in base_env.items()
-            if key not in _STRIPPED_CODEX_ENV_KEYS and not key.startswith("OPENAI_")
+            if key not in _STRIPPED_CODEX_ENV_KEYS
+            and not key.startswith("OPENAI_")
+            and key not in credential_env_names
         },
         proxy_root_url=proxy_root_url,
     )

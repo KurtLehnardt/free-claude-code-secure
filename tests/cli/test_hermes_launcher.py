@@ -441,6 +441,8 @@ def test_hermes_child_environment_preserves_native_state_and_replaces_owned_keys
         base_env={
             "PATH": "keep",
             "HERMES_HOME": "native-home",
+            # A provider credential must never reach the launched Hermes child:
+            # only fcc-server calls providers, so Hermes does not need one.
             "OPENROUTER_API_KEY": "native-key",
             "FCC_HERMES_STALE": "stale",
             "HERMES_MANAGED_DIR": "stale-policy",
@@ -452,7 +454,7 @@ def test_hermes_child_environment_preserves_native_state_and_replaces_owned_keys
 
     assert env["PATH"] == "keep"
     assert env["HERMES_HOME"] == "native-home"
-    assert env["OPENROUTER_API_KEY"] == "native-key"
+    assert "OPENROUTER_API_KEY" not in env
     assert env["HERMES_MANAGED_DIR"] == str(tmp_path)
     assert env["FCC_HERMES_FRESH"] == "proxy-token"
     assert "FCC_HERMES_STALE" not in env

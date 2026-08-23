@@ -2,7 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -47,7 +47,7 @@ def _settings(**updates: object) -> Settings:
 
 
 def _assert_ordinary_protocol_error(
-    response: httpx.Response,
+    response: httpx2.Response,
     *,
     wire_api: str,
     status_code: int,

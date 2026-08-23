@@ -22,6 +22,24 @@ FCC_COMMANDS = (
     "free-claude-code",
 )
 
+# System tools the uninstaller invokes before/through the running-process check.
+# Exposed as symlinks (never copies) in the pgrep-less process-fallback PATH.
+_PROCESS_FALLBACK_TOOLS = (
+    "dirname",
+    "basename",
+    "uname",
+    "sed",
+    "sort",
+    "tr",
+    "cat",
+    "grep",
+    "head",
+    "mktemp",
+    "mkdir",
+    "rm",
+    "chmod",
+)
+
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -111,10 +129,23 @@ class PosixUninstallHarness:
 printf '%s\n' "$FCC_PS_OUTPUT"
 """,
         )
-        awk = shutil.which("awk", path=self.env["PATH"])
+        # Force the pgrep-less code path: the uninstaller only reaches the
+        # `ps | awk` fallback when pgrep is absent from PATH, so PATH is pruned
+        # to a directory that deliberately omits pgrep. The remaining system
+        # tools the uninstaller touches before/through the process check are
+        # exposed as SYMLINKS, never copies: copying a macOS platform binary
+        # (awk, ...) invalidates its code signature and the kernel SIGKILLs the
+        # copy, and copy2/copystat replays BSD file flags via chflags which is
+        # rejected under a restricted sandbox.
+        search_path = self.env["PATH"]
+        awk = shutil.which("awk", path=search_path)
         if awk is None:
             pytest.skip("awk is required for the POSIX process fallback scenario")
-        shutil.copy2(awk, fallback_bin / "awk")
+        os.symlink(awk, fallback_bin / "awk")
+        for tool in _PROCESS_FALLBACK_TOOLS:
+            resolved = shutil.which(tool, path=search_path)
+            if resolved is not None:
+                os.symlink(resolved, fallback_bin / tool)
         self.env["FCC_PS_OUTPUT"] = process_line
         self.env["PATH"] = str(fallback_bin)
 
