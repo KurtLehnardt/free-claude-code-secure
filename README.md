@@ -24,9 +24,14 @@
 </p>
 
 # WARNINGS: 
-## Your code and prompts leave your machine to a third‑party free provider. This is inherent to what FCC is — a proxy to external providers. Whatever the agent sends (your prompts + file contents it reads) goes to Groq/NVIDIA/OpenRouter/etc. Free tiers are the weakest on data privacy — several explicitly log or train on your inputs. No proxy hardening changes this. → Don't point it at proprietary/secret/regulated code you can't send to a third party. Fine for OSS, scratch projects, learning.
+## Your code and prompts leave your machine to a third‑party free provider. 
+This is inherent to what FCC is — a proxy to external providers. Whatever the agent sends (your prompts + file contents it reads) goes to Groq/NVIDIA/OpenRouter/etc. Free tiers are the weakest on data privacy — several explicitly log or train on your inputs. No proxy hardening changes this. → Don't point it at proprietary/secret/regulated code you can't send to a third party. Fine for OSS, scratch projects, learning.
 
-## An untrusted provider can try to steer your agent. fcc-claude runs with --dangerously-skip-permissions, and its actions are driven by the model's output. A malicious/compromised provider (or prompt‑injection in content it fetches) could try to make the agent read/exfil local files. We reduced this a lot — the agent no longer holds your provider keys, plus optional hooks and container isolation — but those are layered/heuristic. The only structural guarantee is running the agent sandboxed (container, no secrets, egress‑allowlisted). Running fcc-claude directly in a repo full of secrets is the residual risk.
+## An untrusted provider can try to steer your agent. 
+fcc-claude runs with --dangerously-skip-permissions, and its actions are driven by the model's output. A malicious/compromised provider (or prompt‑injection in content it fetches) could try to make the agent read/exfil local files. We reduced this a lot — the agent no longer holds your provider keys, plus optional hooks and container isolation — but those are layered/heuristic. The only structural guarantee is running the agent sandboxed (container, no secrets, egress‑allowlisted). Running fcc-claude directly in a repo full of secrets is the residual risk.
+
+## This is best used for non‑sensitive coding on free tokens, ideally with the agent sandboxed and proxy auth on. 
+Avoid it for anything confidential (your inputs go to free providers) and don't run the skip‑permissions agent unsandboxed in a directory with real secrets.
 
 
 > **This is a security-hardened fork.** It adds checksum-verified installation, a
