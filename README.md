@@ -29,28 +29,6 @@
 > [Security](#security) for what these controls do and their honest limitations
 > before relying on them.
 
-## Recommended free providers
-
-Free Claude Code routes your coding agent to whichever provider you configure. These
-cloud providers offer **permanent free tiers or free models** and are supported out of
-the box — pick one, grab an API key, set it (e.g. `GROQ_API_KEY`) and a `MODEL`:
-
-- **[Groq](https://console.groq.com/keys)** — generous free tier with rate limits; no credit card required.
-- **[SambaNova](https://cloud.sambanova.ai/apis)** — free tier for developers on SambaNova Cloud.
-- **[Cerebras](https://cloud.cerebras.ai)** — free trial tier for developer inference.
-- **[OpenRouter](https://openrouter.ai/keys)** — hosts specific models at zero token cost (look for the `:free` suffix).
-- **[SiliconFlow](https://cloud.siliconflow.com/account/ak)** — specific models billed at zero cost within rate limits.
-- **[Gemini — Google AI Studio](https://aistudio.google.com/apikey)** — free, rate-limited tier.
-- **[Mistral & Mistral Codestral](https://console.mistral.ai/)** — La Plateforme offers free-tier API endpoints.
-- **[Hugging Face](https://huggingface.co/settings/tokens)** — the Serverless Inference API is free for many open-source models.
-- **[Cloudflare Workers AI](https://dash.cloudflare.com/profile/api-tokens)** — includes a free daily usage quota.
-- **[Cohere](https://dashboard.cohere.com/api-keys)** — free, rate-limited developer tier for non-production use.
-
-> **Tip:** free tiers have rate and payload limits. To drive a full coding agent (which
-> sends a large system prompt), prefer a **large-context** model — e.g. NVIDIA NIM,
-> Gemini, or an OpenRouter `:free` model with a big context window — since small-context
-> free models can reject the request as too large. See [Choose a provider](#choose-a-provider).
-
 ## Security
 
 This is a fork of upstream free-claude-code focused on hardening how the
@@ -378,6 +356,29 @@ intended provider host from an attacker-controlled one.
   bind, so rejecting it at apply-time is further hardening, not yet done;
   and `deps-audit`/`secrets-scan` are not yet enforced as required
   branch-protection status checks.
+
+
+## Recommended free providers
+
+Free Claude Code routes your coding agent to whichever provider you configure. These
+cloud providers offer **permanent free tiers or free models** and are supported out of
+the box — pick one, grab an API key, set it (e.g. `GROQ_API_KEY`) and a `MODEL`:
+
+- **[Groq](https://console.groq.com/keys)** — generous free tier with rate limits; no credit card required.
+- **[SambaNova](https://cloud.sambanova.ai/apis)** — free tier for developers on SambaNova Cloud.
+- **[Cerebras](https://cloud.cerebras.ai)** — free trial tier for developer inference.
+- **[OpenRouter](https://openrouter.ai/keys)** — hosts specific models at zero token cost (look for the `:free` suffix).
+- **[SiliconFlow](https://cloud.siliconflow.com/account/ak)** — specific models billed at zero cost within rate limits.
+- **[Gemini — Google AI Studio](https://aistudio.google.com/apikey)** — free, rate-limited tier.
+- **[Mistral & Mistral Codestral](https://console.mistral.ai/)** — La Plateforme offers free-tier API endpoints.
+- **[Hugging Face](https://huggingface.co/settings/tokens)** — the Serverless Inference API is free for many open-source models.
+- **[Cloudflare Workers AI](https://dash.cloudflare.com/profile/api-tokens)** — includes a free daily usage quota.
+- **[Cohere](https://dashboard.cohere.com/api-keys)** — free, rate-limited developer tier for non-production use.
+
+> **Tip:** free tiers have rate and payload limits. To drive a full coding agent (which
+> sends a large system prompt), prefer a **large-context** model — e.g. NVIDIA NIM,
+> Gemini, or an OpenRouter `:free` model with a big context window — since small-context
+> free models can reject the request as too large. See [Choose a provider](#choose-a-provider).
 
 
 ## What You Get
