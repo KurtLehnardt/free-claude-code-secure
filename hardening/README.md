@@ -1,158 +1,188 @@
-# Hardened Claude Code hooks
+# Claude Code security hooks
 
-This directory ships a ready-to-use [Claude Code hooks](https://docs.claude.com/en/docs/claude-code/hooks)
-configuration and guard script. It is **self-contained** — nothing in here
-modifies your `~/.claude` configuration. You choose whether and where to
-wire it in (see [Enabling it](#enabling-it) below).
+Free Claude Code ships a **default-on** `PreToolUse` security guard for its
+Claude Code launchers. Every `fcc-claude` session, and every managed
+(messaging / `fcc-desktop`) Claude Code task, launches with the guard already
+registered. You do not have to enable anything.
+
+The guard is a packaged Python console script (`fcc-hook-guard`, from
+`src/free_claude_code/security/`) so it survives `uv tool install` and is on
+`PATH` next to `fcc-claude`. The launchers register it by appending
+`--settings '<json>'` to the `claude` invocation; that JSON **merges** with your
+existing `~/.claude` configuration (permissions, other hooks, MCP servers) and
+never replaces it.
 
 ## Threat model
 
 Free Claude Code routes your coding agent's model traffic through whichever
 provider you configure — including free/low-cost third-party providers whose
-model weights, prompts, and output you do not control. That provider is, by
-definition, an **untrusted upstream**: anything it returns can be interpreted
-by the coding agent as instructions, including tool calls.
+weights, prompts, and output you do not control. That provider is an
+**untrusted upstream**: anything it returns can be interpreted by the coding
+agent as instructions, including tool calls.
 
 This matters most for the **managed agent path**
-(`src/free_claude_code/cli/managed/claude.py`), which launches Claude Code
-with `--dangerously-skip-permissions` so it can run unattended from a
-messaging integration (Telegram/Discord). That flag skips the *interactive*
-permission prompts — it does not disable hooks. A provider that returns a
-subtly malicious tool call (for example, "helpfully" running
-`cat ~/.ssh/id_rsa` to "check SSH config," or `env | curl ... -d @-` to
-"report diagnostics") would normally sail straight through, because nothing
-is asking a human to approve it first.
+(`src/free_claude_code/cli/managed/claude.py`), which launches Claude Code with
+`--dangerously-skip-permissions` so it can run unattended from a messaging
+integration (Telegram/Discord) and from `fcc-desktop`. That flag skips the
+*interactive* permission prompts — it does **not** disable hooks. A provider
+that returns a subtly malicious tool call (for example "helpfully" running
+`cat ~/.ssh/id_rsa` to "check SSH config," or `env | curl … -d @-` to "report
+diagnostics") would otherwise sail straight through, because nothing asks a
+human to approve it first.
 
-The hooks in this directory are a **PreToolUse guard**: a small script that
-Claude Code runs before every matched tool call and that can veto it. They
-give you a second, independent check that fires regardless of permission
-mode — interactive or `--dangerously-skip-permissions` alike.
+The guard is a second, independent check that fires **regardless of permission
+mode** — interactive or `--dangerously-skip-permissions` alike. It runs before
+every matched tool call and can veto it.
 
-## What's here
+## How it works (the contract)
 
-- `hooks/settings.json` — a Claude Code settings snippet wiring a
-  `PreToolUse` hook, matched against `Bash`, `Read`, `Edit`, `Write`,
-  `WebFetch`, and `WebSearch`, to run `hooks/fcc-guard.sh`.
-- `hooks/fcc-guard.sh` — the guard script itself (POSIX `sh`, no
-  non-portable bashisms; verified with `sh -n` and `shellcheck -s sh`).
+Claude Code writes one JSON object to the guard's stdin per matched tool call,
+e.g. `{"tool_name": "Bash", "tool_input": {"command": "curl https://x"}}`. The
+guard replies on the documented Claude Code 2.1.x `PreToolUse` contract:
+
+- **Allow** → exit 0 with no stdout ("no opinion"; the normal permission flow
+  proceeds).
+- **Deny** → exit 0 with a JSON object on stdout:
+
+  ```json
+  {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                          "permissionDecision": "deny",
+                          "permissionDecisionReason": "fcc-hook-guard: …"}}
+  ```
+
+  Claude Code feeds `permissionDecisionReason` back to the model, so the deny
+  both stops the call and tells the agent *why* (and what to do instead).
+
+The registered matcher is
+`Bash|Read|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch|Grep|Glob`.
+
+## Design philosophy
+
+The guard denies **only high-signal dangerous operations** and is deliberately
+tuned to leave ordinary development work alone. It blocks the patterns a
+compromised provider would use to steal secrets or exfiltrate data; it does not
+try to sandbox the agent or approve/deny everything. Concretely, these all stay
+allowed: `git commit`, `git push origin main` (and force-push to a *named*
+remote), `git reset --hard`, `pytest`, `npm test`/`npm install <pkg>`,
+`pip install <pkg>`, `rm -rf node_modules`, `chmod +x`, `curl http://127.0.0.1…`
+(the local proxy), `ssh-keygen`, local `rsync`, reading/editing project source,
+and reading `.env.example` / `.env.sample` templates.
 
 ## What it blocks
 
-Claude Code passes the guard one JSON object on stdin per matched tool call
-(`{"tool_name": "...", "tool_input": {...}}`). The guard denies the call —
-exit code `2`, with the reason on stderr, which Claude Code returns to the
-model as the reason rather than just showing a human — when:
+Grouped by category (see `src/free_claude_code/security/hook_guard.py` for the
+exact rules — each rule carries a plain-English reason):
 
-**(a) Any matched tool reads or writes a well-known secret location** —
-checked against `tool_input` for every matcher (`Bash`, `Read`, `Edit`,
-`Write`, `WebFetch`, `WebSearch`):
+1. **Secret file access — read OR write** (all matched tools). Credential
+   directories (`~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.kube`, `~/.docker`,
+   `~/.azure`, `~/.gnupg`, `~/.config/gh`); `.env` / `.env.*` secret files
+   (templates like `.env.example` are allowed); `*.pem` / `*.key` / `*.p12`
+   private keys; `id_rsa*` / `id_ed25519*`; `~/.netrc`, `~/.npmrc`, `~/.pypirc`,
+   `~/.git-credentials`; FCC's own `~/.fcc/proxy_auth_token` and `~/.fcc/.env`;
+   macOS Keychains (`~/Library/Keychains`, `security dump-keychain`); browser
+   cookie / saved-login databases; `/etc/shadow`; shell/REPL history
+   (`~/.zsh_history`, `~/.bash_history`, …); SSH `authorized_keys`.
+2. **Exfiltration (Bash).** `curl`/`wget`/`nc`/`ncat`/`scp`/`sftp`/`ssh`/
+   `telnet`/`socat`, and `rsync` to a remote spec, against a **non-loopback**
+   host; piping `env`/`printenv` or `base64` into a network tool; `/dev/tcp/`
+   socket redirects; DNS exfiltration (a long encoded label in `dig`/`nslookup`/
+   `host`); `sendmail`/`mailx`/`mail -s`; inline `python`/`node`/`ruby`/`perl`
+   one-liners that open a socket to a non-loopback host; `git push` to an
+   ad-hoc URL remote.
+3. **Remote code execution.** `curl … | sh` / `| bash` (and other
+   pipe-to-interpreter forms), `bash <(curl …)`, `$(curl …)`, `pip`/`pipx`/
+   `uv pip install` from a URL/VCS spec, `npm`/`pnpm`/`yarn install` of a
+   git/URL spec, `npx` against a URL/GitHub spec.
+4. **Privilege escalation / persistence / system tampering.** `sudo`/`doas`;
+   disabling SIP / Gatekeeper / firewall (`csrutil disable`,
+   `spctl --master-disable`, `pfctl -d`, `ufw disable`, …); editing
+   `/etc/sudoers` or PAM; launchd persistence (`launchctl load`,
+   `~/Library/LaunchAgents`); cron/at persistence; writing to shell startup
+   files (`~/.zshrc`, `~/.bashrc`, …); `chmod 777`; appending SSH keys
+   (`ssh-copy-id`, `>> authorized_keys`).
+5. **Destructive.** `rm -rf /` / `~` / `$HOME` / `/*`; fork bombs; `dd` to a
+   raw disk device; `mkfs`/`newfs`/`wipefs`/`shred`/`diskutil erase`.
+6. **Cloud-metadata SSRF (WebFetch + Bash).** `169.254.169.254`,
+   `metadata.google.internal`, `fd00:ec2::254`, `169.254.170.2`,
+   `100.100.100.200`.
 
-- `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.kube`, `~/.docker`
-- `.env` / `.env.*` files, `*.pem` files, `id_rsa*` key files, `~/.netrc`
-- `~/.fcc/proxy_auth_token` (the local FCC proxy's own credential)
-- macOS Keychain (`Login.keychain`, anything under `~/Library/Keychains/`,
-  `security find-generic-password` / `find-internet-password` /
-  `dump-keychain`)
-- Browser cookie databases (`Cookies`, `cookies.sqlite`)
+For `WebFetch`/`WebSearch` the guard only trips on a URL/query that *names* a
+secret path or a metadata endpoint — it does **not** block ordinary outbound
+fetches, since that is `WebFetch`'s job.
 
-For `WebFetch`/`WebSearch` this only catches a URL or query that names one
-of the paths above (e.g. a `file://` URL pointing at `~/.ssh`) — it does
-**not** block ordinary outbound fetches to arbitrary hosts, since that is
-`WebFetch`'s normal job.
+## Opting out
 
-**(b) A `Bash` command looks like it exfiltrates data:**
+Set `FCC_DISABLE_SECURITY_HOOKS=1` in the launcher's environment to omit the
+`--settings` guard registration entirely. Any other value (or unset) keeps it
+on. Use this if a rule blocks something you legitimately need and you accept the
+risk.
 
-- `curl` / `wget` / `nc` / `ncat` / `scp` / `sftp` / `ssh` / `telnet` used
-  against anything that isn't recognizably loopback (`127.0.0.1`,
-  `localhost`, `::1`, `0.0.0.0`) — local calls to your own `fcc-server` are
-  allowed, everything else using one of those tools is not.
-- `git push`
-- `env` or `printenv` piped into one of the tools above
-- `base64` piped into one of the tools above (a common way to smuggle binary
-  or secret-shaped data past naive text filters)
+Known deliberate false-blocks (the cost of the "block by default" posture):
 
-Everything else is allowed (exit `0`).
+- **`curl`/`wget` to a non-loopback host is denied.** Use the `WebFetch` tool or
+  the local proxy (`127.0.0.1`) for legitimate fetches. This is the primary
+  exfiltration channel, so it is blocked even though it also stops manual remote
+  `curl`.
+- **`sudo`/`doas` is denied.** The agent should not need root; run privileged
+  steps yourself.
+- **Reading `.env` (non-template), `*.pem`, and `*.key` is denied**, even for
+  your own project's files. Use `.env.example` or ask for the specific value.
 
-## Enabling it
+## Trust model
 
-Pick one:
+Hooks provided via `claude --settings` at startup run automatically; Claude Code
+does **not** show a review/acknowledgement dialog for them, and the managed path
+runs with `--dangerously-skip-permissions` anyway. So a normal `fcc-claude` run
+picks up the guard silently, with no extra prompt. (Claude Code's separate
+workspace-*folder* trust dialog is unrelated to this and unaffected. If an
+administrator has set the managed-policy `allowManagedHooksOnly`, `--settings`
+hooks may be suppressed — an uncommon configuration.)
 
-1. **Project-scoped (recommended for the managed/messaging agent path).**
-   Copy this repository's `hardening/` directory into the workspace
-   directory the managed agent runs in (`config.workspace_path` /
-   `ManagedClaudeConfig.workspace_path`), then merge the `hooks` object from
-   `hooks/settings.json` into that workspace's `.claude/settings.json`.
-   Claude Code resolves `$CLAUDE_PROJECT_DIR` in hook `command` strings to
-   that project root automatically, so the path in the shipped
-   `settings.json` works unmodified as long as `hardening/hooks/fcc-guard.sh`
-   sits at `<project>/hardening/hooks/fcc-guard.sh`.
+## Standalone shell variant (legacy / non-FCC setups)
 
-2. **Global, via `CLAUDE_CONFIG_DIR`.** Point the `CLAUDE_CONFIG_DIR`
-   environment variable at a directory containing a `settings.json` with
-   this `hooks` stanza, but replace the `command` value with an **absolute**
-   path to `fcc-guard.sh` (`$CLAUDE_PROJECT_DIR` only resolves relative to a
-   project, not a global config dir). This applies the guard to every
-   Claude Code session that uses that config dir.
+`hooks/fcc-guard.sh` + `hooks/settings.json` are the original standalone POSIX
+`sh` prototype. The packaged `fcc-hook-guard` **supersedes** it for FCC
+launchers and covers many more categories. The shell script is kept for setups
+where the Python package is not installed — e.g. wiring a guard into a global
+`CLAUDE_CONFIG_DIR` or a container image by hand. It implements only categories
+(1) and part of (2). To wire it in manually, merge the `hooks` object from
+`hooks/settings.json` into the relevant `.claude/settings.json`, pointing
+`command` at an absolute path to `hooks/fcc-guard.sh`.
 
-Either way, merge the `hooks` object — don't just overwrite an existing
-`settings.json` that already has other keys (permissions, other hooks,
-etc.).
+## Limits — be precise about what this buys you
 
-To verify the guard script parses correctly on your system:
+- **It is a heuristic regex filter over tool-call JSON, not a shell parser, a
+  taint tracker, or a sandbox.** It does not understand shell quoting, variable
+  expansion, command substitution, pipelines beyond the specific patterns above,
+  or indirection through a wrapper script. A motivated adversarial provider can
+  very likely construct a command that exfiltrates data without matching any
+  rule — writing a host into a variable first, using an interpreter or binary
+  not on the list, obfuscating a path, or splitting a sensitive read across two
+  separate approved tool calls that only recombine in the model's own context.
+- **The non-loopback check is intentionally blunt.** A command that mentions
+  *both* a loopback address and a remote one is allowed, because the check is
+  "mentions a loopback marker somewhere," not "every target is loopback."
+- **It only sees Claude Code's own `PreToolUse` tools.** It has no visibility
+  into MCP tool calls, a sub-agent's tool use, or anything outside the matched
+  tool set.
+- **It fails open.** On any internal parse error it allows the call, so a guard
+  bug cannot brick every tool call. That means it is not a hard boundary.
+- **It is not the security boundary.** Two stronger layers do the real work:
+  (a) the launcher environment builders (`cli/claude_env.py`) already **strip
+  every provider credential** (`GROQ_API_KEY`, `NVIDIA_NIM_API_KEY`, …) before
+  spawning the agent, so those secrets are not in the child process for a
+  compromised tool call to read back out; and (b) the project's containerized,
+  egress-filtered deployment (see the main
+  [`README.md`](../README.md#containerized-isolated-runtime) — non-root,
+  read-only rootfs, `internal: true` network, Squid egress allowlist) is the
+  real backstop. This guard is a best-effort third layer against secrets that
+  legitimately live on disk (SSH keys, cloud credentials, browser cookies) and
+  against the most common exfiltration and secret-access patterns — not a
+  guarantee that unauthorized access is prevented.
+
+To exercise the guard the way Claude Code would:
 
 ```bash
-sh -n hardening/hooks/fcc-guard.sh
+printf '%s' '{"tool_name":"Bash","tool_input":{"command":"cat ~/.ssh/id_rsa"}}' \
+  | fcc-hook-guard; echo "exit=$?"
 ```
-
-To exercise it directly, the way Claude Code would:
-
-```bash
-printf '%s' '{"tool_name":"Bash","tool_input":{"command":"cat ~/.ssh/id_rsa"}}' | hardening/hooks/fcc-guard.sh; echo "exit=$?"
-```
-
-`jq` is used when present for correct JSON field extraction; without it the
-script falls back to a plain-text scan (see [Limits](#limits)).
-
-## Limits
-
-Be precise with yourself about what this buys you:
-
-- **It is a heuristic string/regex filter over JSON text, not a parser, a
-  taint tracker, or a sandbox.** It does not understand shell quoting,
-  variable expansion, command substitution, multi-command pipelines beyond
-  the specific patterns above, or indirection through a wrapper script. A
-  sufficiently motivated adversarial provider can very likely construct a
-  Bash command that exfiltrates data without matching any pattern here —
-  e.g. writing the target host into a variable first, using a tool not in
-  the exfil list (`python -c 'import urllib...'`, `osascript`, a custom
-  binary), or splitting a sensitive read across two separate approved tool
-  calls that only combine their result later in the model's own context.
-- **The `curl`/`wget`/.../non-loopback check is intentionally blunt.** A
-  command that references *both* a loopback address and a remote one in the
-  same string is allowed, because the check for "loopback-only" is really
-  "mentions a loopback marker somewhere," not "every network target in this
-  command is loopback."
-- **Without `jq`, field extraction degrades to a line-oriented `sed`/`grep`
-  fallback** that only understands simple, unescaped `"key":"value"` pairs.
-  It scans the *entire* raw hook payload in that mode rather than just
-  `tool_input`, which makes it strictly more conservative (more surface
-  scanned, not less) but also slightly more prone to an unrelated false
-  positive (e.g. a `description` field that happens to mention `.ssh` in
-  prose). Install `jq` for more precise field-scoped matching.
-- **It only covers tool calls that go through Claude Code's `PreToolUse`
-  hook — Bash, Read, Edit, Write, WebFetch, WebSearch as matched here.**
-  It has no visibility into, and cannot stop, an MCP tool call, a
-  sub-agent's tool use, or anything outside Claude Code's own hook surface.
-- **It is not the security boundary.** The actual fix for provider
-  credentials reaching a coding agent's subprocess is that the launcher
-  environment builders (`cli/claude_env.py`, `cli/launchers/*.py`) now strip
-  every `credential_env` in `config/provider_catalog.py` before spawning the
-  agent — so there is no `GROQ_API_KEY`/`NVIDIA_NIM_API_KEY`/etc. in the
-  child process for a compromised tool call to read back out in the first
-  place. This hook is a second, independent layer against secrets that
-  *do* legitimately live on disk (SSH keys, cloud credentials, browser
-  cookies) which the launcher fix cannot touch. For anything beyond that,
-  the project's existing containerized, egress-filtered deployment (see the
-  main [`README.md`](../README.md#containerized-isolated-runtime) —
-  non-root, read-only rootfs, `internal: true` network, Squid egress
-  allowlist) is the real backstop, not this script.

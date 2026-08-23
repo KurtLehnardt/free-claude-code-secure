@@ -63,6 +63,7 @@ def test_cli_scripts_are_registered() -> None:
 
     assert pyproject["project"]["scripts"] == {
         "fcc-server": "free_claude_code.cli.entrypoints:serve",
+        "fcc-hook-guard": "free_claude_code.security.hook_guard:main",
         "fcc-claude": "free_claude_code.cli.launchers.claude:launch",
         "fcc-codex": "free_claude_code.cli.launchers.codex:launch",
         "fcc-pi": "free_claude_code.cli.launchers.pi:launch",
@@ -415,6 +416,7 @@ def test_launch_claude_passes_args_and_child_env(
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "old-token")
     monkeypatch.setenv("KEEP_ME", "yes")
     monkeypatch.delenv("DISABLE_TELEMETRY", raising=False)
+    monkeypatch.delenv("FCC_DISABLE_SECURITY_HOOKS", raising=False)
     settings = _launcher_settings(port=9191, token="proxy-token")
 
     with (
@@ -440,7 +442,13 @@ def test_launch_claude_passes_args_and_child_env(
 
     assert exc_info.value.code == 7
     popen.assert_called_once()
-    assert popen.call_args.args[0] == ["resolved-claude.cmd", "--model", "sonnet"]
+    # Default-on security hooks inject `--settings <json>` before user args.
+    command = popen.call_args.args[0]
+    assert command[0] == "resolved-claude.cmd"
+    assert command[-2:] == ["--model", "sonnet"]
+    settings_index = command.index("--settings")
+    hook_settings = json.loads(command[settings_index + 1])
+    assert "PreToolUse" in hook_settings["hooks"]
     child_env = popen.call_args.kwargs["env"]
     assert child_env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:9191"
     assert child_env["ANTHROPIC_AUTH_TOKEN"] == "proxy-token"

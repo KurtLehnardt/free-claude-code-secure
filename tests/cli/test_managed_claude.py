@@ -1,3 +1,4 @@
+import json
 import os
 
 from free_claude_code.cli.claude_env import build_claude_proxy_env
@@ -62,7 +63,7 @@ def test_managed_claude_builds_new_task_command_and_env() -> None:
     assert "stream-json" in invocation.argv
     assert "--add-dir" in invocation.argv
     assert os.path.normpath("/tmp/extra") in invocation.argv
-    assert "--settings" not in invocation.argv
+    assert "--settings" in invocation.argv
     assert invocation.env["PATH"] == "keep"
     assert invocation.env["ANTHROPIC_BASE_URL"] == "http://localhost:8082"
     assert invocation.env["ANTHROPIC_AUTH_TOKEN"] == "proxy-token"
@@ -117,11 +118,26 @@ def test_managed_claude_builds_resume_and_fork_commands() -> None:
     assert "--fork-session" in fork.argv
 
 
-def test_managed_claude_uses_native_plan_storage() -> None:
+def test_managed_claude_registers_security_hook_by_default() -> None:
     invocation = build_managed_claude_invocation(
         config=_config(),
         request=ManagedClaudeTaskRequest(prompt="hello"),
         base_env={},
+    )
+
+    assert "--settings" in invocation.argv
+    settings_index = invocation.argv.index("--settings")
+    settings = json.loads(invocation.argv[settings_index + 1])
+    pre_tool_use = settings["hooks"]["PreToolUse"]
+    assert pre_tool_use[0]["hooks"][0]["type"] == "command"
+    assert "Bash" in pre_tool_use[0]["matcher"]
+
+
+def test_managed_claude_omits_security_hook_on_opt_out() -> None:
+    invocation = build_managed_claude_invocation(
+        config=_config(),
+        request=ManagedClaudeTaskRequest(prompt="hello"),
+        base_env={"FCC_DISABLE_SECURITY_HOOKS": "1"},
     )
 
     assert "--settings" not in invocation.argv
