@@ -58,19 +58,37 @@ def is_stream_usage_rejection(error: Exception) -> bool:
     return any(word in text for word in _USAGE_REJECTION_WORDS)
 
 
-def usage_int(usage_info: Any, key: str) -> int | None:
-    """Extract an integer usage field from OpenAI SDK objects or plain dicts."""
+def _usage_value(usage_info: Any, key: str) -> object | None:
+    """Return a raw usage field from an SDK object, plain dict, or model_extra."""
     if usage_info is None:
         return None
     if isinstance(usage_info, Mapping):
-        value = usage_info.get(key)
-    else:
-        value = getattr(usage_info, key, None)
-        if value is None:
-            extra = getattr(usage_info, "model_extra", None)
-            if isinstance(extra, Mapping):
-                value = extra.get(key)
+        return usage_info.get(key)
+    value = getattr(usage_info, key, None)
+    if value is None:
+        extra = getattr(usage_info, "model_extra", None)
+        if isinstance(extra, Mapping):
+            value = extra.get(key)
+    return value
+
+
+def usage_int(usage_info: Any, key: str) -> int | None:
+    """Extract an integer usage field from OpenAI SDK objects or plain dicts."""
+    value = _usage_value(usage_info, key)
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def usage_nested_int(usage_info: Any, parent_key: str, key: str) -> int | None:
+    """Extract an integer field nested one level under ``parent_key``.
+
+    Mirrors the OpenAI-compatible ``usage.prompt_tokens_details.cached_tokens``
+    shape, handling SDK objects, plain dicts, and ``model_extra`` fallbacks at
+    either level.
+    """
+    nested = _usage_value(usage_info, parent_key)
+    if nested is None:
+        return None
+    return usage_int(nested, key)
 
 
 def _is_bad_request_like(error: Exception) -> bool:
