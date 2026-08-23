@@ -3149,6 +3149,13 @@ function Invoke-RestMethod {{
     param([string] $Uri, [string] $OutFile)
     [IO.File]::WriteAllText($OutFile, "<style>div#box {{")
 }}
+# The hardened Invoke-DownloadedPowerShellInstaller verifies the downloaded
+# bytes against the pinned checksum manifest (Confirm-PinnedFile) before
+# parsing/executing them. Stub it as a successful no-op so the harness
+# exercises the PowerShell-validity check that runs immediately after (this
+# test's actual subject), instead of failing earlier on an unrecognized
+# command under StrictMode.
+function Confirm-PinnedFile {{ param([string] $Path, [string] $Label, [string] $ComponentId) }}
 function Get-PowerShellExecutable {{ throw "invalid installer reached execution" }}
 function Invoke-DownloadedPowerShellInstaller {{{body}}}
 Invoke-DownloadedPowerShellInstaller `

