@@ -4,6 +4,7 @@ import asyncio
 import math
 import sys
 from collections.abc import AsyncIterator, Callable
+from dataclasses import replace
 from typing import Literal
 
 from loguru import logger
@@ -16,12 +17,18 @@ from free_claude_code.core.anthropic import (
     get_token_count,
 )
 from free_claude_code.core.failures import ExecutionFailure, FailureKind
+from free_claude_code.core.security import (
+    OutboundRedactionMode,
+    RequestRedaction,
+    redact_messages_request,
+)
 from free_claude_code.core.trace import (
     close_stream_input,
     trace_event,
     traced_async_stream,
 )
 
+from .errors import InvalidRequestError
 from .ports import ProviderResolver
 from .routing import ProviderModelTarget, RoutedMessagesRequest
 
@@ -43,6 +50,7 @@ class ProviderExecutor:
         token_counter: TokenCounter = get_token_count,
         generation_id: int | None = None,
         log_raw_payloads: bool = False,
+        outbound_secret_redaction: OutboundRedactionMode = OutboundRedactionMode.OFF,
     ) -> None:
         if not math.isfinite(progress_timeout_seconds) or progress_timeout_seconds <= 0:
             raise ValueError("progress_timeout_seconds must be finite and positive")
@@ -50,6 +58,7 @@ class ProviderExecutor:
         self._token_counter = token_counter
         self._generation_id = generation_id
         self._log_raw_payloads = log_raw_payloads
+        self._outbound_secret_redaction = outbound_secret_redaction
         self._progress_timeout_seconds = float(progress_timeout_seconds)
 
     def _progress_timeout_failure(
@@ -140,6 +149,62 @@ class ProviderExecutor:
             fields["generation_id"] = self._generation_id
         trace_event(**fields)
 
+    def _apply_outbound_redaction(
+        self,
+        routed: RoutedMessagesRequest,
+        *,
+        wire_api: WireApi,
+        request_id: str,
+    ) -> RoutedMessagesRequest:
+        """Scrub or block provider-bound secrets before any provider send.
+
+        Runs once on the Anthropic-format request, so every candidate (primary
+        and fallbacks) that later derives from ``routed.request`` inherits the
+        redacted content. Never logs the secret value itself.
+        """
+        if self._outbound_secret_redaction is OutboundRedactionMode.OFF:
+            return routed
+        result = redact_messages_request(routed.request)
+        if result.total == 0:
+            return routed
+        if self._outbound_secret_redaction is OutboundRedactionMode.BLOCK:
+            raise InvalidRequestError(
+                "Request blocked by outbound secret redaction policy: detected "
+                f"{result.total} potential secret(s) ({result.summary()}). Remove "
+                "the secret(s) from the request, or set "
+                "OUTBOUND_SECRET_REDACTION=redact to scrub them automatically."
+            )
+        self._trace_outbound_redaction(result, wire_api=wire_api, request_id=request_id)
+        return replace(routed, request=result.request)
+
+    def _trace_outbound_redaction(
+        self,
+        result: RequestRedaction,
+        *,
+        wire_api: WireApi,
+        request_id: str,
+    ) -> None:
+        summary = result.summary()
+        logger.warning(
+            "Outbound secret redaction: request_id={} redacted {} secret(s) "
+            "before provider send; categories: {}",
+            request_id,
+            result.total,
+            summary,
+        )
+        fields: dict[str, object] = {
+            "stage": "egress",
+            "event": "free_claude_code.security.outbound_redaction",
+            "source": "api",
+            "request_id": request_id,
+            "wire_api": wire_api,
+            "redacted_count": result.total,
+            "categories": dict(result.category_counts),
+        }
+        if self._generation_id is not None:
+            fields["generation_id"] = self._generation_id
+        trace_event(**fields)
+
     def stream(
         self,
         routed: RoutedMessagesRequest,
@@ -150,6 +215,9 @@ class ProviderExecutor:
         request_id: str,
     ) -> AsyncIterator[str]:
         """Preflight synchronously, then return the traced provider stream."""
+        routed = self._apply_outbound_redaction(
+            routed, wire_api=wire_api, request_id=request_id
+        )
         primary = routed.resolved.primary
         primary_provider = self._provider_resolver(primary.provider_id)
         primary_request = routed.request.model_copy(deep=True)
