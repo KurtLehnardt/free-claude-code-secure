@@ -3,7 +3,7 @@
 <h1>
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="assets/free-claude-code-wordmark-light.svg">
-    <img src="assets/free-claude-code-wordmark-dark.svg" alt="Free Claude Code" width="610">
+    <img src="assets/free-claude-code-wordmark-dark.svg" alt="Free Claude Code - Secure" width="610">
   </picture>
 </h1>
 
