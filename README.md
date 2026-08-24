@@ -2,8 +2,8 @@
 
 <h1>
   <picture>
-    <source media="(prefers-color-scheme: light)" srcset="assets/free-claude-code-wordmark-light.svg">
-    <img src="assets/free-claude-code-wordmark-dark.svg" alt="Free Claude Code - Secure" width="610">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/Free%20Claude%20Code%20dark.png">
+    <img src="assets/Free%20Claude%20Code%20light.png" alt="Free Claude Code - Secure" width="700">
   </picture>
 </h1>
 
@@ -193,6 +193,76 @@ logged) rather than accepted from any Telegram user, matching the existing
 Discord behavior. Previously, an unset allowlist meant *any* Telegram user
 could drive the managed coding-agent subprocess.
 
+### Provider-credential isolation
+
+Every launcher strips **all** provider API-key environment variables from the
+spawned coding-agent subprocess before it ever starts — 41 of them
+(`GROQ_API_KEY`, `NVIDIA_NIM_API_KEY`, `OPENROUTER_API_KEY`, and so on for
+every provider in the catalog). `build_claude_proxy_env` (`cli/claude_env.py`)
+filters the child environment against `provider_credential_env_names()`
+(`config/provider_catalog.py`), which derives the strip list from the
+provider catalog itself rather than a hand-maintained copy. The coding agent
+receives only the loopback proxy token, never a provider key, so a
+provider-steered `printenv` or file-read can't harvest a credential the
+agent's own process never held. This is a structural guarantee, not a
+pattern match — it holds even if every heuristic layer below it is evaded.
+
+### Agent guardrails — default-on hooks
+
+`fcc-claude` and every managed (messaging / `fcc-desktop`) Claude Code task
+auto-register a `PreToolUse` guard by appending `claude --settings '<json>'`
+to the launch command — merged with your existing `~/.claude` configuration,
+never replacing it. The registered hook shells out to the packaged
+`fcc-hook-guard` console script (`security/hook_guard.py`,
+`security/hook_settings.py`) before each matched tool call and denies:
+
+- **Secret-file access** (read or write) — `~/.ssh`, `~/.aws`,
+  `~/.config/gcloud`, `~/.kube`, `~/.docker`, `~/.azure`, `*.pem`/`*.key`,
+  `id_rsa*`, `.netrc`/`.npmrc`/`.pypirc`/`.git-credentials`, FCC's own
+  `~/.fcc` secrets, macOS keychains, browser credential databases, shell
+  history, and SSH `authorized_keys`.
+- **Exfiltration** — network tools (`curl`/`wget`/`nc`/`scp`/`ssh`/...)
+  against a non-loopback host, `env | <net tool>`, `base64 | <net tool>`,
+  `/dev/tcp` redirects, DNS exfiltration, and `git push <URL>` to an ad-hoc
+  remote.
+- **Remote code execution** — `curl | sh`-style pipe-to-shell, and
+  `pip`/`npm` installs from a bare URL.
+- **Privilege escalation / persistence** — `sudo`, disabling SIP/the
+  firewall, writing shell rc files, cron/launchd persistence.
+- **Destructive operations** — `rm -rf /`/`~`, fork bombs, `dd`, `mkfs`.
+- **Cloud-metadata SSRF** — `169.254.169.254` and equivalent endpoints.
+- **`web_fetch`/`web_search` host lockdown** — any fetch to a non-loopback
+  host is denied by default (allowlist specific hosts with
+  `FCC_WEBFETCH_ALLOW_HOSTS`, or disable the rule entirely with
+  `FCC_ALLOW_WEB_FETCH=1`); `web_search` has no caller-specified host to
+  allowlist at all, so it is denied by default outright.
+
+Opt out of the whole hook suite with `FCC_DISABLE_SECURITY_HOOKS=1`. Honest
+limit: this is a heuristic regex filter over tool-call JSON, not a shell
+parser or a taint tracker — bypassable at the margins (an unlisted tool, an
+obfuscated host, data split across two approved calls that only recombine in
+the model's own context) — and it fails open on any internal parse error, by
+design, so a guard bug can't brick every tool call. Best-effort
+defense-in-depth, not a sandbox. See [`hardening/README.md`](hardening/README.md)
+for the full rule catalog, the threat model, and the layered stack this hook
+sits inside.
+
+### Outbound secret redaction
+
+Before a request reaches the provider, FCC scans the outbound message/system/
+tool-result text for secret-shaped values — PEM private keys,
+`sk-ant-`/`sk-`/`gsk_`/`gh*_`/AWS/`nvapi-`/JWT/`Bearer`-token shapes, and
+entropy-gated `KEY=value` assignments — and redacts or blocks them, at the
+`ProviderExecutor` chokepoint so every provider path is covered
+(`core/security/outbound_redaction.py`, wired in `application/execution.py`).
+Controlled by `OUTBOUND_SECRET_REDACTION` (`config/settings.py`): `redact`
+(default), `block`, or `off`. It never touches `tool_use`/JSON structure —
+only free-form text — and never logs the secret value itself, only a
+per-category count. Honest limit: pattern-based, so it reduces *accidental*
+secret leakage (an env dump, a pasted `.env` file landing in context) — it is
+not a defense against a user or agent deliberately sharing content with the
+provider.
+
 ### Dependencies & supply-chain scanning
 
 - **Explicit CVE floors** on transitive dependencies that could otherwise
@@ -274,6 +344,42 @@ reload:
 docker compose exec egress-proxy squid -k reconfigure
 ```
 
+### Sandboxed, isolated agent runner
+
+[`sandbox/`](sandbox/) is the strongest available defense against data
+exfiltration by an untrusted provider: it runs the coding agent itself — not
+just `fcc-server` — inside its own container. `fcc-agent` mounts no host
+secrets (no `~/.ssh`, `~/.aws`, `~/.kube`, `~/.config/gcloud`, `~/.docker`,
+`~/.anthropic`, `~/.claude`, `~/.fcc`); it receives only the loopback proxy
+auth token, via Compose variable interpolation from `sandbox/.env` rather
+than `env_file`, so none of the `<PROVIDER>_API_KEY` values in that same file
+ever reach it. It sits on an `internal: true` Docker network with **no route
+to the internet at all** — the only host it can reach is `fcc-server` by
+Docker service-name DNS, and only `fcc-server` can reach the internet, through
+the same Squid egress allowlist described above. The only host path it can
+write to is your project directory, mounted read-write at a fixed `/work`.
+Like the root deployment, it runs non-root with a read-only rootfs,
+`cap_drop: ALL`, and `no-new-privileges:true`.
+
+Run it from inside the project you want the agent to work on:
+
+```bash
+FCC_PROJECT_DIR=$(pwd) docker compose -f /path/to/free-claude-code/sandbox/docker-compose.yml run --rm fcc-agent
+```
+
+See [`sandbox/README.md`](sandbox/README.md) for setup (`cp .env.example
+sandbox/.env`, then fill in provider keys and a real `ANTHROPIC_AUTH_TOKEN`)
+and the full isolation diagram. Honest limits: this has **not** been
+build-tested in this fork's authoring environment (no Docker daemon
+available — validated instead by parsing the Compose YAML and hand-checking
+the Dockerfile stages against the root `Dockerfile`'s established patterns;
+run a real `docker compose build`/`up` yourself before relying on it); the
+provider still sees whatever the agent legitimately sends it as part of
+normal operation (this isolates *local* secrets and *arbitrary* egress, not
+your project's content from the provider you configured); and its base image
+digests need pinning (`@sha256:<digest>`) before any production use, same as
+the root `Dockerfile`.
+
 ### Source audit tooling
 
 [`scripts/audit.sh`](scripts/audit.sh) is a heuristic, grep-based scan of the
@@ -348,10 +454,30 @@ intended provider host from an attacker-controlled one.
   reviewed hashes — by design, so no hash is ever fabricated on your behalf.
 - **Managed coding agents run with `--dangerously-skip-permissions`.** This
   is inherent to running an autonomous coding agent unattended (it can't stop
-  to ask a human for every file edit or shell command); the real barrier
-  against an untrusted third party driving that agent is the fail-closed
+  to ask a human for every file edit or shell command). The fail-closed
   messaging allowlists (Telegram `ALLOWED_TELEGRAM_USER_ID`, Discord's
-  equivalent) documented above — not a sandboxed subprocess.
+  equivalent) documented above are the barrier against an *unauthorized*
+  third party driving that agent at all. Once a message is authorized, the
+  barrier against an *untrusted provider* steering that same agent's tool
+  calls is the layered stack above (provider-credential isolation, the
+  default-on `fcc-hook-guard` hooks, outbound secret redaction, and the
+  sandboxed agent runner) — see the honest limits below.
+- **The agent-guardrail stack is layered; only two of its layers are
+  structural guarantees.** Provider-credential isolation (stripping provider
+  API keys from the agent's own environment) and the [sandboxed agent
+  runner](sandbox/README.md)'s network isolation hold even against a fully
+  adversarial provider. `fcc-hook-guard`'s `PreToolUse` checks are a
+  heuristic regex filter that fails open on any internal parse error — a
+  motivated adversarial provider can plausibly construct a tool call that
+  evades it. Outbound secret redaction (`OUTBOUND_SECRET_REDACTION`) is
+  pattern-based and only reduces *accidental* leakage. The sandboxed runner
+  is the strongest layer but has not been build-tested in this fork's
+  authoring environment (no Docker daemon available; see its own Honest
+  limits section) — treat it as code-reviewed, not verified end-to-end,
+  until you've run `docker compose build`/`up` yourself. None of these
+  layers, individually or together, inspect the prompt/context sent to the
+  model — a secret pasted into the conversation reaches the provider
+  regardless.
 - **This is a private, unaudited fork.** It has not been independently
   audited, and no third party has certified any of the controls described
   above. Two internal remediation passes are tracked in
@@ -401,6 +527,7 @@ the box — pick one, grab an API key, set it (e.g. `GROQ_API_KEY`) and a `MODEL
 - **Terminal, desktop, IDE, or phone.** Work through native launchers, [VS Code](https://code.visualstudio.com/), [Codex App](https://learn.chatgpt.com/docs/app), [JetBrains](https://www.jetbrains.com/), [Discord](https://discord.com/), or [Telegram](https://telegram.org/).
 - **Voice notes in. Code out.** Talk to your agent using local [Whisper](https://github.com/openai/whisper) or [NVIDIA NIM](https://docs.nvidia.com/nim/speech/latest/asr/deploy-asr-models/whisper.html) transcription.
 - **Agent capabilities stay intact.** Stream responses, use tools, preserve native interleaved thinking for maximum performance, send images, and route [Fable](https://www.anthropic.com/claude/fable), [Opus](https://www.anthropic.com/claude/opus), [Sonnet](https://www.anthropic.com/claude/sonnet), and [Haiku](https://www.anthropic.com/claude/haiku) independently with compatible models.
+- **Accurate cache-usage reporting.** For OpenAI-compatible providers that do automatic prefix caching, FCC now maps their `prompt_tokens_details.cached_tokens` onto Anthropic's `cache_read_input_tokens`, fixing inflated `/cost` display. Providers that don't cache (e.g. NVIDIA NIM, Groq) still report none — this surfaces caching a provider already does rather than adding new caching behavior.
 
 Free-tier availability and limits are controlled by each provider and may change.
 
