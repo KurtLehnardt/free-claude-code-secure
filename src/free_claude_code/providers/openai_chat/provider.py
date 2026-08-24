@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mappin
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
+import httpx2
 from loguru import logger
 from openai import AsyncOpenAI
 
@@ -160,9 +160,9 @@ class OpenAIChatProvider(BaseProvider):
         self._admission = admission
         http_client = None
         if config.proxy:
-            http_client = httpx.AsyncClient(
+            http_client = httpx2.AsyncClient(
                 proxy=config.proxy,
-                timeout=httpx.Timeout(
+                timeout=httpx2.Timeout(
                     config.http_read_timeout,
                     connect=config.http_connect_timeout,
                     read=config.http_read_timeout,
@@ -174,7 +174,7 @@ class OpenAIChatProvider(BaseProvider):
             base_url=self._base_url,
             max_retries=0,
             default_headers=default_headers,
-            timeout=httpx.Timeout(
+            timeout=httpx2.Timeout(
                 config.http_read_timeout,
                 connect=config.http_connect_timeout,
                 read=config.http_read_timeout,

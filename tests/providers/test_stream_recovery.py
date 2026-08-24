@@ -1,6 +1,7 @@
 """Provider stream commit-boundary and recovery policy."""
 
 import httpx
+import httpx2
 import openai
 
 from free_claude_code.providers.stream_recovery import (
@@ -17,7 +18,7 @@ def _statusless_openai_api_error(
 ) -> openai.APIError:
     return openai.APIError(
         message,
-        request=httpx.Request("POST", "https://provider.test/messages"),
+        request=httpx2.Request("POST", "https://provider.test/messages"),
         body=body,
     )
 
@@ -52,6 +53,17 @@ def test_stream_retry_preserves_timeout_scope() -> None:
     assert not is_retryable_stream_error(httpx.PoolTimeout("pool", request=request))
 
 
+def test_retryable_stream_error_classifies_httpx2_transport_errors() -> None:
+    # openai>=3 runs on httpx2, whose transport exceptions escape raw mid-stream and
+    # are a distinct hierarchy from httpx, so they must classify identically.
+    request = httpx2.Request("POST", "https://provider.test/messages")
+
+    assert is_retryable_stream_error(httpx2.ReadError("cut off"))
+    assert is_retryable_stream_error(httpx2.ReadTimeout("read", request=request))
+    assert is_retryable_stream_error(httpx2.RemoteProtocolError("interrupted"))
+    assert is_retryable_stream_error(httpx2.ConnectError("connect failed"))
+
+
 def test_retryable_stream_error_classifies_statusless_api_error_body_status() -> None:
     assert is_retryable_stream_error(
         _statusless_openai_api_error(
@@ -80,11 +92,11 @@ def test_retryable_stream_error_classifies_resource_exhausted_text() -> None:
 
 
 def test_retryable_stream_error_does_not_retry_bad_request_status() -> None:
-    request = httpx.Request("POST", "https://provider.test/messages")
+    request = httpx2.Request("POST", "https://provider.test/messages")
     assert not is_retryable_stream_error(
         openai.BadRequestError(
             "bad request",
-            response=httpx.Response(400, request=request),
+            response=httpx2.Response(400, request=request),
             body={"error": {"message": "bad request"}},
         )
     )

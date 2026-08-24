@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import httpx
+import httpx2
 import openai
 import pytest
 
@@ -27,8 +28,8 @@ def _openai_status_error(
     message: str,
     body: object | None = None,
 ) -> openai.APIStatusError:
-    request = httpx.Request("POST", "https://provider.test/v1/chat/completions")
-    response = httpx.Response(status_code, request=request)
+    request = httpx2.Request("POST", "https://provider.test/v1/chat/completions")
+    response = httpx2.Response(status_code, request=request)
     return error_type(
         message,
         response=response,
@@ -39,7 +40,7 @@ def _openai_status_error(
 def _statusless_openai_error(message: str, body: object | None) -> openai.APIError:
     return openai.APIError(
         message,
-        request=httpx.Request("POST", "https://provider.test/v1/chat/completions"),
+        request=httpx2.Request("POST", "https://provider.test/v1/chat/completions"),
         body=body,
     )
 
@@ -251,7 +252,7 @@ _CASES = (
     _ClassificationCase(
         "openai_connection_error_keeps_status",
         lambda: openai.APIConnectionError(
-            request=httpx.Request("POST", "https://provider.test/v1/chat/completions")
+            request=httpx2.Request("POST", "https://provider.test/v1/chat/completions")
         ),
         FailureKind.UNAVAILABLE,
         500,
@@ -413,12 +414,12 @@ def test_http_405_diagnostic_names_rejected_upstream_endpoint() -> None:
 
 
 def test_connection_cause_chain_is_redacted_and_capped() -> None:
-    request = httpx.Request("POST", "https://provider.test/v1/chat/completions")
-    error = openai.APIConnectionError(request=request)
+    url = "https://provider.test/v1/chat/completions"
+    error = openai.APIConnectionError(request=httpx2.Request("POST", url))
     error.__cause__ = httpx.ConnectError(
         "connect failed authorization: Bearer CAUSE_SECRET "
         + "x" * (ERROR_DETAIL_DISPLAY_CAP_BYTES + 10),
-        request=request,
+        request=httpx.Request("POST", url),
     )
 
     failure = classify_provider_failure(
@@ -433,6 +434,31 @@ def test_connection_cause_chain_is_redacted_and_capped() -> None:
     assert "CAUSE_SECRET" not in failure.message
     assert f"truncated after {ERROR_DETAIL_DISPLAY_CAP_BYTES} bytes" in failure.message
     assert "Request ID: req_cause" in failure.message
+
+
+def test_httpx2_transport_errors_classify_like_httpx() -> None:
+    # openai>=3 uses httpx2, a distinct exception hierarchy from httpx. Its transport
+    # errors surface raw mid-stream and must retry and classify the same as httpx.
+    request = httpx2.Request("POST", "https://provider.test/v1/chat/completions")
+
+    assert is_retryable_provider_error(httpx2.ReadError("cut off"))
+    assert is_retryable_provider_error(httpx2.ReadTimeout("read", request=request))
+
+    timeout = classify_provider_failure(
+        httpx2.ReadTimeout("read", request=request),
+        provider_name="NIM",
+        read_timeout_s=30.0,
+        request_id=None,
+    )
+    assert timeout.kind == FailureKind.TIMEOUT
+
+    unavailable = classify_provider_failure(
+        httpx2.ConnectError("connect failed", request=request),
+        provider_name="NIM",
+        read_timeout_s=30.0,
+        request_id=None,
+    )
+    assert unavailable.kind == FailureKind.UNAVAILABLE
 
 
 def test_attached_streamed_error_body_remains_bounded() -> None:
