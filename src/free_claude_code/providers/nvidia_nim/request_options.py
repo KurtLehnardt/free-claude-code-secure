@@ -21,7 +21,11 @@ NIM_REQUEST_POLICY = OpenAIChatRequestPolicy(
 
 
 def build_nim_request_body(
-    request_data: MessagesRequest, nim: NimSettings, *, reasoning: ReasoningPolicy
+    request_data: MessagesRequest,
+    nim: NimSettings,
+    *,
+    reasoning: ReasoningPolicy,
+    enable_reasoning_control: bool = True,
 ) -> dict[str, Any]:
     """Build OpenAI-format request body from Anthropic request plus NIM settings."""
     return build_openai_chat_request_body(
@@ -34,6 +38,7 @@ def build_nim_request_body(
                 request,
                 policy,
                 nim=nim,
+                enable_reasoning_control=enable_reasoning_control,
             ),
         ),
     )
@@ -45,6 +50,7 @@ def apply_nim_request_options(
     reasoning: ReasoningPolicy,
     *,
     nim: NimSettings,
+    enable_reasoning_control: bool = True,
 ) -> None:
     """Apply NIM schema repairs and configured request defaults."""
     sanitize_nim_tool_schemas(body)
@@ -93,10 +99,16 @@ def apply_nim_request_options(
         if not request_template_kwargs:
             extra_body.pop("chat_template_kwargs", None)
 
-    if reasoning.control is ReasoningControl.OFF or reasoning.requests_reasoning:
+    reasoning_off = reasoning.control is ReasoningControl.OFF
+    # Reasoning-on encoding (thinking=true + budget mapping) always applies.
+    # Reasoning-off encoding (thinking=false) is the ENABLE_NIM_REASONING_CONTROL
+    # escape hatch: it is what makes REASONING_POLICY=off actually disable
+    # nemotron's thinking instead of a no-op, but a caller may disable it if a
+    # specific NIM-routed model rejects the chat_template_kwargs field entirely.
+    if reasoning.requests_reasoning or (reasoning_off and enable_reasoning_control):
         chat_template_kwargs = extra_body.setdefault("chat_template_kwargs", {})
         if isinstance(chat_template_kwargs, dict):
-            enabled = reasoning.control is not ReasoningControl.OFF
+            enabled = not reasoning_off
             chat_template_kwargs["thinking"] = enabled
             chat_template_kwargs["enable_thinking"] = enabled
             if enabled and (budget := reasoning.numeric_budget_tokens) is not None:

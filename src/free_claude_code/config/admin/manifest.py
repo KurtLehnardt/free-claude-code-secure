@@ -182,6 +182,22 @@ _NON_PROVIDER_FIELDS: tuple[ConfigFieldSpec, ...] = (
         options=_reasoning_options(ROUTE_REASONING_PREFERENCES),
     ),
     ConfigFieldSpec(
+        "ENABLE_NIM_REASONING_CONTROL",
+        "NIM Reasoning Control",
+        "reasoning",
+        "boolean",
+        settings_attr="enable_nim_reasoning_control",
+        description=(
+            "When a REASONING_POLICY / REASONING_* route resolves to off, send "
+            "chat_template_kwargs.thinking=false (and enable_thinking=false) to "
+            "NVIDIA NIM so nemotron actually skips its hidden reasoning block "
+            "instead of thinking per the server default. Reasoning-on requests "
+            "are unaffected. Disable if a specific NIM-routed model rejects "
+            "chat_template_kwargs."
+        ),
+        advanced=True,
+    ),
+    ConfigFieldSpec(
         "PROXY_AUTH_ENABLED",
         "Require API Authentication",
         "runtime",

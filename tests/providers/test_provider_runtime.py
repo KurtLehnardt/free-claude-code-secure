@@ -174,6 +174,7 @@ def _make_settings(**overrides):
     mock.log_raw_sse_events = False
     mock.log_api_error_tracebacks = False
     mock.enable_quota_anticipation = True
+    mock.enable_nim_reasoning_control = True
     mock.nim = NimSettings()
     for key, value in overrides.items():
         setattr(mock, key, value)
@@ -949,6 +950,17 @@ def test_different_providers_have_independent_admission_controllers() -> None:
     assert isinstance(nim, NvidiaNimProvider)
     assert isinstance(open_router, OpenRouterProvider)
     assert nim._admission is not open_router._admission
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_nvidia_nim_provider_threads_reasoning_control_flag(enabled: bool) -> None:
+    runtime = ProviderRuntime(_make_settings(enable_nim_reasoning_control=enabled))
+
+    with patch("free_claude_code.providers.openai_chat.provider.AsyncOpenAI"):
+        nim = runtime.resolve_provider("nvidia_nim")
+
+    assert isinstance(nim, NvidiaNimProvider)
+    assert nim._enable_reasoning_control is enabled
 
 
 def test_unknown_provider_raises_unknown_provider_type_error():

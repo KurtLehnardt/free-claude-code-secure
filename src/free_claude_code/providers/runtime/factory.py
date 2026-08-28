@@ -33,6 +33,7 @@ def _create_nvidia_nim(
         config,
         nim_settings=settings.nim,
         admission=admission,
+        enable_reasoning_control=settings.enable_nim_reasoning_control,
     )
 
 

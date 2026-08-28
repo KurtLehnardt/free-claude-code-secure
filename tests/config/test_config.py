@@ -160,6 +160,14 @@ def test_auto_compact_window_is_exposed_as_an_admin_number_field() -> None:
     assert entry.section_id == "runtime"
 
 
+def test_enable_nim_reasoning_control_is_exposed_as_an_admin_boolean_field() -> None:
+    entry = FIELD_BY_KEY["ENABLE_NIM_REASONING_CONTROL"]
+
+    assert entry.settings_attr == "enable_nim_reasoning_control"
+    assert entry.field_type == "boolean"
+    assert entry.section_id == "reasoning"
+
+
 @pytest.mark.parametrize(
     "key",
     [
