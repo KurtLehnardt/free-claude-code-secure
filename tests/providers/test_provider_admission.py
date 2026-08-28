@@ -10,11 +10,15 @@ from unittest.mock import patch
 import httpx
 import pytest
 
+from free_claude_code.config.admin.manifest import FIELD_BY_KEY
+from free_claude_code.config.settings import Settings
 from free_claude_code.core.failures import ExecutionFailure, FailureKind
 from free_claude_code.providers.admission import (
     UPSTREAM_TRANSIENT_TOTAL_ATTEMPTS,
     ProviderAdmissionController,
     ProviderRetrySession,
+    RateLimitSignal,
+    _rate_limit_signal_from_error,
     _retry_after_seconds,
 )
 from free_claude_code.providers.failure_policy import ProviderRecoveryExhausted
@@ -30,6 +34,7 @@ def _controller(
     max_attempts: int = UPSTREAM_TRANSIENT_TOTAL_ATTEMPTS,
     base_delay: float = 0.0,
     max_delay: float = 0.0,
+    enable_quota_anticipation: bool = True,
 ) -> ProviderAdmissionController:
     return ProviderAdmissionController(
         provider_name=provider_name,
@@ -40,6 +45,7 @@ def _controller(
         base_delay=base_delay,
         max_delay=max_delay,
         jitter=0.0,
+        enable_quota_anticipation=enable_quota_anticipation,
     )
 
 
@@ -47,9 +53,13 @@ def _status_error(
     status: int,
     *,
     retry_after: str | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> httpx.HTTPStatusError:
     request = httpx.Request("POST", "https://provider.test/chat/completions")
-    headers = {"retry-after": retry_after} if retry_after is not None else None
+    headers = dict(extra_headers) if extra_headers is not None else None
+    if retry_after is not None:
+        headers = headers or {}
+        headers["retry-after"] = retry_after
     response = httpx.Response(status, request=request, headers=headers)
     return httpx.HTTPStatusError(
         f"upstream returned {status}",
@@ -741,3 +751,294 @@ async def test_provider_controllers_do_not_share_recovery_state() -> None:
     probe = await first.open_attempt(first_session)
     await probe.succeeded()
     await probe.aclose()
+
+
+# ==================== Rate-limit-header-aware backoff and failover ====================
+
+
+@pytest.mark.parametrize(
+    ("value", "expected_seconds"),
+    [
+        ("30", 30.0),
+        ("30s", 30.0),
+        ("1m", 60.0),
+        ("500ms", 0.5),
+    ],
+)
+def test_rate_limit_signal_parses_seconds_and_subsecond_reset_forms(
+    value: str, expected_seconds: float
+) -> None:
+    error = _status_error(429, extra_headers={"x-ratelimit-reset-tokens": value})
+
+    signal = _rate_limit_signal_from_error(error)
+
+    assert signal is not None
+    assert signal.reset_seconds == pytest.approx(expected_seconds)
+    assert signal.remaining_tokens is None
+    assert signal.remaining_requests is None
+
+
+def test_rate_limit_signal_reads_remaining_counts() -> None:
+    error = _status_error(
+        429,
+        extra_headers={
+            "x-ratelimit-remaining-tokens": "0",
+            "x-ratelimit-remaining-requests": "12",
+        },
+    )
+
+    signal = _rate_limit_signal_from_error(error)
+
+    assert signal is not None
+    assert signal.remaining_tokens == 0
+    assert signal.remaining_requests == 12
+    assert signal.exhausted is True
+
+
+def test_rate_limit_signal_from_error_returns_none_for_missing_or_malformed_headers() -> (
+    None
+):
+    assert _rate_limit_signal_from_error(_status_error(429)) is None
+    assert (
+        _rate_limit_signal_from_error(
+            _status_error(
+                429, extra_headers={"x-ratelimit-reset-tokens": "not-a-duration"}
+            )
+        )
+        is None
+    )
+    assert (
+        _rate_limit_signal_from_error(
+            _status_error(429, extra_headers={"x-ratelimit-remaining-tokens": "abc"})
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("remaining_tokens", "remaining_requests", "expected"),
+    [
+        (0, None, True),
+        (None, 0, True),
+        (0, 0, True),
+        (5, 5, False),
+        (None, None, False),
+    ],
+)
+def test_rate_limit_signal_exhausted_reflects_zero_remaining(
+    remaining_tokens: int | None,
+    remaining_requests: int | None,
+    expected: bool,
+) -> None:
+    signal = RateLimitSignal(
+        reset_seconds=None,
+        remaining_tokens=remaining_tokens,
+        remaining_requests=remaining_requests,
+    )
+
+    assert signal.exhausted is expected
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_reset_header_sizes_the_cooldown() -> None:
+    controller = _controller(max_attempts=2, base_delay=0.0, max_delay=0.0)
+    attempts = 0
+
+    async def recover() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise _status_error(429, extra_headers={"x-ratelimit-reset-tokens": "9s"})
+        return "ok"
+
+    with patch(
+        "free_claude_code.providers.admission.asyncio.sleep",
+        return_value=None,
+    ) as sleep:
+        assert await controller.run_with_retry(recover) == "ok"
+
+    sleep.assert_awaited_once()
+    await_args = sleep.await_args
+    assert await_args is not None
+    assert 8.9 <= await_args.args[0] <= 9.0
+
+
+@pytest.mark.asyncio
+async def test_retry_after_still_wins_when_larger_than_reset_header() -> None:
+    controller = _controller(max_attempts=2, base_delay=0.0, max_delay=0.0)
+    attempts = 0
+
+    async def recover() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise _status_error(
+                429,
+                retry_after="10",
+                extra_headers={"x-ratelimit-reset-tokens": "3s"},
+            )
+        return "ok"
+
+    with patch(
+        "free_claude_code.providers.admission.asyncio.sleep",
+        return_value=None,
+    ) as sleep:
+        assert await controller.run_with_retry(recover) == "ok"
+
+    await_args = sleep.await_args
+    assert await_args is not None
+    assert 9.9 <= await_args.args[0] <= 10.0
+
+
+@pytest.mark.asyncio
+async def test_reset_header_wins_when_larger_than_retry_after() -> None:
+    controller = _controller(max_attempts=2, base_delay=0.0, max_delay=0.0)
+    attempts = 0
+
+    async def recover() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise _status_error(
+                429,
+                retry_after="2",
+                extra_headers={"x-ratelimit-reset-tokens": "9s"},
+            )
+        return "ok"
+
+    with patch(
+        "free_claude_code.providers.admission.asyncio.sleep",
+        return_value=None,
+    ) as sleep:
+        assert await controller.run_with_retry(recover) == "ok"
+
+    await_args = sleep.await_args
+    assert await_args is not None
+    assert 8.9 <= await_args.args[0] <= 9.0
+
+
+@pytest.mark.asyncio
+async def test_zero_remaining_tokens_fails_over_immediately_when_anticipation_enabled() -> (
+    None
+):
+    controller = _controller(max_attempts=5, base_delay=1.0, max_delay=1.0)
+    session = controller.new_retry_session()
+    attempt = await controller.open_attempt(session)
+    error = _status_error(429, extra_headers={"x-ratelimit-remaining-tokens": "0"})
+
+    should_retry = await attempt.retry(error)
+
+    assert should_retry is False
+    assert session.attempts_started == 1
+    assert session.can_attempt  # per-request attempt budget was far from exhausted
+    await attempt.aclose()
+
+
+@pytest.mark.asyncio
+async def test_zero_remaining_tokens_cools_down_the_whole_provider_immediately() -> (
+    None
+):
+    controller = _controller(max_attempts=5, base_delay=5.0, max_delay=5.0)
+    session = controller.new_retry_session()
+    attempt = await controller.open_attempt(session)
+    error = _status_error(429, extra_headers={"x-ratelimit-remaining-tokens": "0"})
+
+    assert await attempt.retry(error) is False
+    await attempt.aclose()
+
+    # The provider is treated as exhausted immediately: a fresh request does not
+    # wait through a normal per-attempt backoff cycle before finding out this
+    # provider currently has no quota, so the caller can fail over sooner.
+    with pytest.raises(ProviderRecoveryExhausted):
+        await controller.open_attempt(controller.new_retry_session())
+
+
+@pytest.mark.asyncio
+async def test_zero_remaining_tokens_is_ignored_when_anticipation_disabled() -> None:
+    controller = _controller(
+        max_attempts=5,
+        base_delay=0.0,
+        max_delay=0.0,
+        enable_quota_anticipation=False,
+    )
+    session = controller.new_retry_session()
+    attempt = await controller.open_attempt(session)
+    error = _status_error(429, extra_headers={"x-ratelimit-remaining-tokens": "0"})
+
+    should_retry = await attempt.retry(error)
+
+    assert should_retry is True
+    await attempt.aclose()
+
+
+@pytest.mark.asyncio
+async def test_reset_header_is_ignored_when_anticipation_disabled() -> None:
+    controller = _controller(
+        max_attempts=2,
+        base_delay=0.0,
+        max_delay=0.0,
+        enable_quota_anticipation=False,
+    )
+    attempts = 0
+
+    async def recover() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise _status_error(429, extra_headers={"x-ratelimit-reset-tokens": "9s"})
+        return "ok"
+
+    with patch(
+        "free_claude_code.providers.admission.asyncio.sleep",
+        return_value=None,
+    ) as sleep:
+        assert await controller.run_with_retry(recover) == "ok"
+
+    # With anticipation disabled, behavior matches today: no reset-header delay,
+    # only the (zero) base backoff applies, so asyncio.sleep is never awaited.
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_malformed_rate_limit_headers_leave_backoff_unchanged() -> None:
+    controller = _controller(max_attempts=2, base_delay=0.05, max_delay=0.05)
+    attempts = 0
+
+    async def recover() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise _status_error(
+                429,
+                extra_headers={
+                    "x-ratelimit-reset-tokens": "not-a-duration",
+                    "x-ratelimit-remaining-tokens": "not-a-number",
+                },
+            )
+        return "ok"
+
+    with patch(
+        "free_claude_code.providers.admission.asyncio.sleep",
+        return_value=None,
+    ) as sleep:
+        assert await controller.run_with_retry(recover) == "ok"
+
+    sleep.assert_awaited_once()
+    await_args = sleep.await_args
+    assert await_args is not None
+    assert 0.04 <= await_args.args[0] <= 0.06
+
+
+def test_enable_quota_anticipation_is_exposed_as_an_admin_boolean_field() -> None:
+    entry = FIELD_BY_KEY["ENABLE_QUOTA_ANTICIPATION"]
+
+    assert entry.settings_attr == "enable_quota_anticipation"
+    assert entry.field_type == "boolean"
+    assert entry.section_id == "runtime"
+    assert Settings.model_fields["enable_quota_anticipation"].validation_alias == (
+        "ENABLE_QUOTA_ANTICIPATION"
+    )
+
+
+def test_enable_quota_anticipation_defaults_to_true() -> None:
+    assert Settings().enable_quota_anticipation is True

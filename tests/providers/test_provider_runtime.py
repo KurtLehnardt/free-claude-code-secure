@@ -173,6 +173,7 @@ def _make_settings(**overrides):
     mock.http_connect_timeout = 10.0
     mock.log_raw_sse_events = False
     mock.log_api_error_tracebacks = False
+    mock.enable_quota_anticipation = True
     mock.nim = NimSettings()
     for key, value in overrides.items():
         setattr(mock, key, value)
@@ -895,6 +896,7 @@ def test_create_provider_instantiates_each_builtin():
                 rate_limit=7,
                 rate_window=11,
                 max_concurrency=3,
+                enable_quota_anticipation=True,
             )
             admission_factory.reset_mock()
 
