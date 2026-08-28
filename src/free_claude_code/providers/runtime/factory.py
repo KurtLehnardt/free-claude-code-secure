@@ -201,6 +201,7 @@ def create_provider(
         rate_limit=config.rate_limit,
         rate_window=config.rate_window,
         max_concurrency=config.max_concurrency,
+        enable_quota_anticipation=settings.enable_quota_anticipation,
     )
     factory = (injected_factories or {}).get(provider_id)
     if provider_id in _INJECTED_PROVIDER_IDS and factory is None:

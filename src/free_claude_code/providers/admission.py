@@ -3,6 +3,7 @@
 import asyncio
 import math
 import random
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -71,6 +72,20 @@ class ProviderRetrySession:
 
     def _terminal_failure(self) -> Exception | None:
         return self._terminal_error
+
+
+@dataclass(frozen=True, slots=True)
+class RateLimitSignal:
+    """A provider's own view of its rate-limit reset window and remaining quota."""
+
+    reset_seconds: float | None
+    remaining_tokens: int | None
+    remaining_requests: int | None
+
+    @property
+    def exhausted(self) -> bool:
+        """Return whether the provider reports zero remaining tokens or requests."""
+        return self.remaining_tokens == 0 or self.remaining_requests == 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +213,7 @@ class ProviderAdmissionController:
         base_delay: float = DEFAULT_UPSTREAM_BASE_DELAY,
         max_delay: float = DEFAULT_UPSTREAM_MAX_DELAY,
         jitter: float = DEFAULT_UPSTREAM_JITTER,
+        enable_quota_anticipation: bool = True,
     ) -> None:
         if rate_limit <= 0:
             raise ValueError("rate_limit must be > 0")
@@ -219,6 +235,7 @@ class ProviderAdmissionController:
         self._base_delay = base_delay
         self._max_delay = max_delay
         self._jitter = jitter
+        self._enable_quota_anticipation = enable_quota_anticipation
         self._proactive_limiter = StrictSlidingWindowLimiter(
             rate_limit, float(rate_window)
         )
@@ -498,8 +515,12 @@ class ProviderAdmissionController:
         error: Exception,
         status: int | None,
     ) -> bool:
-        can_retry = session.can_attempt
-        delay = self._retry_delay(error, session.attempts_started)
+        rate_limit_signal = self._rate_limit_signal(error)
+        quota_exhausted = rate_limit_signal is not None and rate_limit_signal.exhausted
+        can_retry = session.can_attempt and not quota_exhausted
+        delay = self._retry_delay(
+            error, session.attempts_started, rate_limit_signal=rate_limit_signal
+        )
         became_leader = False
         exhausted_episode = False
 
@@ -528,6 +549,7 @@ class ProviderAdmissionController:
                 terminal_delay = self._retry_delay(
                     error,
                     session.attempts_started,
+                    rate_limit_signal=rate_limit_signal,
                 )
                 if episode is None:
                     episode = self._start_recovery_episode(
@@ -596,6 +618,7 @@ class ProviderAdmissionController:
                 exc_type=type(error).__name__,
                 attempts=session.attempts_started,
                 episode_exhausted=exhausted_episode,
+                quota_exhausted=quota_exhausted,
             )
         return can_retry
 
@@ -677,12 +700,30 @@ class ProviderAdmissionController:
     def _release_concurrency(self) -> None:
         self._concurrency_sem.release()
 
-    def _retry_delay(self, error: Exception, attempt: int) -> float:
+    def _retry_delay(
+        self,
+        error: Exception,
+        attempt: int,
+        *,
+        rate_limit_signal: RateLimitSignal | None = None,
+    ) -> float:
         exponent = max(0, attempt - 1)
         backoff = min(self._base_delay * (2**exponent), self._max_delay)
         backoff += random.uniform(0, self._jitter)
         retry_after = _retry_after_seconds(error)
-        return max(backoff, retry_after or 0.0)
+        delay = max(backoff, retry_after or 0.0)
+        if (
+            rate_limit_signal is not None
+            and rate_limit_signal.reset_seconds is not None
+        ):
+            delay = max(delay, rate_limit_signal.reset_seconds)
+        return delay
+
+    def _rate_limit_signal(self, error: Exception) -> RateLimitSignal | None:
+        """Return the provider's rate-limit signal when anticipation is enabled."""
+        if not self._enable_quota_anticipation:
+            return None
+        return _rate_limit_signal_from_error(error)
 
     @staticmethod
     def _failure_label(status: int | None, error: Exception) -> str:
@@ -715,3 +756,74 @@ def _retry_after_seconds(error: Exception) -> float | None:
     if not math.isfinite(seconds):
         return None
     return max(0.0, seconds)
+
+
+_RESET_HEADER_NAMES = (
+    "x-ratelimit-reset-tokens",
+    "x-ratelimit-reset-requests",
+    "x-ratelimit-reset",
+)
+_RESET_DURATION_PATTERN = re.compile(
+    r"^(\d+(?:\.\d+)?)(ms|s|m|h)?$",
+    re.IGNORECASE,
+)
+_RESET_DURATION_MULTIPLIERS = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
+
+
+def _rate_limit_signal_from_error(error: Exception) -> RateLimitSignal | None:
+    """Return the provider's rate-limit reset/remaining headers, when present."""
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+
+    reset_seconds: float | None = None
+    for name in _RESET_HEADER_NAMES:
+        value = headers.get(name)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        reset_seconds = _parse_reset_delay_seconds(value.strip())
+        if reset_seconds is not None:
+            break
+
+    remaining_tokens = _parse_remaining(headers.get("x-ratelimit-remaining-tokens"))
+    remaining_requests = _parse_remaining(headers.get("x-ratelimit-remaining-requests"))
+    if (
+        reset_seconds is None
+        and remaining_tokens is None
+        and remaining_requests is None
+    ):
+        return None
+    return RateLimitSignal(
+        reset_seconds=reset_seconds,
+        remaining_tokens=remaining_tokens,
+        remaining_requests=remaining_requests,
+    )
+
+
+def _parse_reset_delay_seconds(value: str) -> float | None:
+    match = _RESET_DURATION_PATTERN.match(value)
+    if match is not None:
+        amount = float(match.group(1))
+        unit = (match.group(2) or "s").lower()
+        seconds = amount * _RESET_DURATION_MULTIPLIERS[unit]
+        return seconds if math.isfinite(seconds) else None
+    try:
+        retry_at = parsedate_to_datetime(value)
+    except TypeError, ValueError, OverflowError:
+        return None
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=UTC)
+    seconds = (retry_at - datetime.now(UTC)).total_seconds()
+    if not math.isfinite(seconds):
+        return None
+    return max(0.0, seconds)
+
+
+def _parse_remaining(value: str | None) -> int | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped.isdigit():
+        return None
+    return int(stripped)

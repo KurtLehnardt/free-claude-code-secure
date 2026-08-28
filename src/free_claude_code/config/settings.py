@@ -592,6 +592,16 @@ class Settings(BaseModel):
         default=True,
         validation_alias="ENABLE_FILEPATH_EXTRACTION_MOCK",
     )
+    # When true, the provider admission controller reads standard rate-limit
+    # response headers (x-ratelimit-reset-tokens/-requests, x-ratelimit-remaining-*)
+    # on a 429 to size the recovery cooldown to the provider's actual reset window
+    # and fail over to the next provider/model sooner once a provider reports it
+    # is out of quota, instead of only honoring retry-after. Off restores the
+    # retry-after-only behavior.
+    enable_quota_anticipation: bool = Field(
+        default=True,
+        validation_alias="ENABLE_QUOTA_ANTICIPATION",
+    )
     # Token threshold at which Claude Code auto-compacts conversation history
     # (CLAUDE_CODE_AUTO_COMPACT_WINDOW on the launched CLI process). Lower this
     # for small-context free models (32k/64k) so compaction fires before the

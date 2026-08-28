@@ -429,6 +429,20 @@ _NON_PROVIDER_FIELDS: tuple[ConfigFieldSpec, ...] = (
         advanced=True,
     ),
     ConfigFieldSpec(
+        "ENABLE_QUOTA_ANTICIPATION",
+        "Quota Anticipation",
+        "runtime",
+        "boolean",
+        settings_attr="enable_quota_anticipation",
+        description=(
+            "Read provider rate-limit response headers (reset/remaining) on a "
+            "429 to size the recovery cooldown to the actual reset window and "
+            "fail over to the next provider/model sooner once a provider "
+            "reports it is out of quota, instead of only honoring retry-after."
+        ),
+        advanced=True,
+    ),
+    ConfigFieldSpec(
         "AUTO_COMPACT_WINDOW",
         "Auto-Compaction Window",
         "runtime",
