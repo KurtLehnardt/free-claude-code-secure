@@ -10,6 +10,7 @@ from free_claude_code.cli.claude_env import (
     CLAUDE_BINARY_NAME,
     build_claude_proxy_env,
 )
+from free_claude_code.config.constants import AUTO_COMPACT_WINDOW_DEFAULT
 from free_claude_code.core.json_types import JsonObject, JsonValue
 from free_claude_code.security.hook_settings import security_settings_args
 
@@ -44,6 +45,7 @@ class ManagedClaudeConfig:
     auth_token: str
     allowed_dirs: list[str] = field(default_factory=list)
     claude_bin: str = CLAUDE_BINARY_NAME
+    auto_compact_window: int = AUTO_COMPACT_WINDOW_DEFAULT
 
 
 @dataclass(slots=True)
@@ -81,6 +83,7 @@ def build_managed_claude_invocation(
             proxy_root_url=config.proxy_root_url,
             auth_token=config.auth_token,
             base_env=base_env,
+            auto_compact_window=config.auto_compact_window,
         ),
         cwd=config.workspace_path,
         trace_metadata={
@@ -101,6 +104,7 @@ def build_managed_claude_env(
     proxy_root_url: str,
     auth_token: str,
     base_env: Mapping[str, str],
+    auto_compact_window: int,
 ) -> dict[str, str]:
     """Return a Claude Code task environment that targets the local proxy."""
 
@@ -108,6 +112,7 @@ def build_managed_claude_env(
         proxy_root_url=proxy_root_url,
         auth_token=auth_token,
         base_env=base_env,
+        auto_compact_window=auto_compact_window,
     )
     env["DISABLE_TELEMETRY"] = "1"
     env["TERM"] = "dumb"

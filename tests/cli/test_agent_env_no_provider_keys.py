@@ -18,6 +18,7 @@ from free_claude_code.config.provider_catalog import provider_credential_env_nam
 _LEAK_PREFIX = "LEAKED-"
 _PROXY_ROOT_URL = "http://127.0.0.1:9191"
 _PROXY_AUTH_TOKEN = "proxy-token"
+_AUTO_COMPACT_WINDOW = 190_000
 
 
 def _provider_credential_env_sample() -> dict[str, str]:
@@ -60,6 +61,7 @@ def test_claude_launcher_env_strips_provider_credentials() -> None:
         proxy_root_url=_PROXY_ROOT_URL,
         auth_token=_PROXY_AUTH_TOKEN,
         base_env=base_env,
+        auto_compact_window=_AUTO_COMPACT_WINDOW,
     )
 
     _assert_no_provider_credentials_leaked(env)
@@ -212,6 +214,7 @@ def test_managed_claude_env_strips_provider_credentials() -> None:
         proxy_root_url=_PROXY_ROOT_URL,
         auth_token=_PROXY_AUTH_TOKEN,
         base_env=base_env,
+        auto_compact_window=_AUTO_COMPACT_WINDOW,
     )
 
     _assert_no_provider_credentials_leaked(env)

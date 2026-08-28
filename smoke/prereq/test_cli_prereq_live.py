@@ -45,6 +45,7 @@ def test_claude_cli_prompt_when_available(
             proxy_root_url=server.base_url,
             auth_token=smoke_config.settings.proxy_auth_token,
             base_env=os.environ,
+            auto_compact_window=smoke_config.settings.auto_compact_window,
         )
         result = run_captured_text(
             [claude_bin, "-p", "Reply with exactly FCC_SMOKE_PONG"],

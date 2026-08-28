@@ -6,6 +6,7 @@ import uuid
 from loguru import logger
 
 from free_claude_code.cli.claude_env import CLAUDE_BINARY_NAME
+from free_claude_code.config.constants import AUTO_COMPACT_WINDOW_DEFAULT
 
 from .session import ManagedClaudeSession
 
@@ -28,6 +29,7 @@ class ManagedClaudeSessionManager:
         auth_token: str,
         log_raw_cli_diagnostics: bool = False,
         log_messaging_error_details: bool = False,
+        auto_compact_window: int = AUTO_COMPACT_WINDOW_DEFAULT,
     ):
         """
         Initialize the session manager.
@@ -44,6 +46,7 @@ class ManagedClaudeSessionManager:
         self.auth_token = auth_token
         self._log_raw_cli_diagnostics = log_raw_cli_diagnostics
         self._log_messaging_error_details = log_messaging_error_details
+        self.auto_compact_window = auto_compact_window
 
         self._sessions: dict[str, ManagedClaudeSession] = {}
         self._pending_sessions: dict[str, ManagedClaudeSession] = {}
@@ -112,6 +115,7 @@ class ManagedClaudeSessionManager:
                 claude_bin=self.claude_bin,
                 auth_token=self.auth_token,
                 log_raw_cli_diagnostics=self._log_raw_cli_diagnostics,
+                auto_compact_window=self.auto_compact_window,
             )
             self._pending_sessions[temp_id] = new_session
 

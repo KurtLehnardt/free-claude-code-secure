@@ -5,7 +5,6 @@ from collections.abc import Mapping
 from free_claude_code.cli.local_http import with_local_proxy_bypass
 from free_claude_code.config.provider_catalog import provider_credential_env_names
 
-CLAUDE_CODE_AUTO_COMPACT_WINDOW = "190000"
 CLAUDE_BINARY_NAME = "claude"
 
 
@@ -14,8 +13,15 @@ def build_claude_proxy_env(
     proxy_root_url: str,
     auth_token: str,
     base_env: Mapping[str, str],
+    auto_compact_window: int,
 ) -> dict[str, str]:
-    """Return the canonical environment for Claude Code proxy sessions."""
+    """Return the canonical environment for Claude Code proxy sessions.
+
+    ``auto_compact_window`` is the operator-configured
+    ``settings.auto_compact_window`` value (``AUTO_COMPACT_WINDOW``); callers
+    must thread it through rather than relying on a hidden default so the
+    window can be right-sized per model.
+    """
 
     # Claude's aggregate traffic flag also suppresses gateway model discovery.
     # Provider credentials are stripped too: only fcc-server calls providers,
@@ -35,7 +41,7 @@ def build_claude_proxy_env(
     env["ANTHROPIC_BASE_URL"] = proxy_root_url
     env["ANTHROPIC_AUTH_TOKEN"] = auth_token
     env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
-    env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = CLAUDE_CODE_AUTO_COMPACT_WINDOW
+    env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(auto_compact_window)
     env["DISABLE_AUTOUPDATER"] = "1"
     env["DISABLE_FEEDBACK_COMMAND"] = "1"
     env["DISABLE_ERROR_REPORTING"] = "1"

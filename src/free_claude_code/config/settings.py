@@ -14,7 +14,7 @@ from pydantic import (
 
 from free_claude_code.core.security import OutboundRedactionMode
 
-from .constants import HTTP_CONNECT_TIMEOUT_DEFAULT
+from .constants import AUTO_COMPACT_WINDOW_DEFAULT, HTTP_CONNECT_TIMEOUT_DEFAULT
 from .nim import NimSettings
 from .provider_catalog import (
     BEDROCK_DEFAULT_BASE,
@@ -592,6 +592,15 @@ class Settings(BaseModel):
         default=True,
         validation_alias="ENABLE_FILEPATH_EXTRACTION_MOCK",
     )
+    # Token threshold at which Claude Code auto-compacts conversation history
+    # (CLAUDE_CODE_AUTO_COMPACT_WINDOW on the launched CLI process). Lower this
+    # for small-context free models (32k/64k) so compaction fires before the
+    # provider hard-fails with a context-overflow error; default preserves
+    # Claude Code's built-in window.
+    auto_compact_window: int = Field(
+        default=AUTO_COMPACT_WINDOW_DEFAULT,
+        validation_alias="AUTO_COMPACT_WINDOW",
+    )
 
     # ==================== Local web server tools (web_search / web_fetch) ====================
     # On by default to match Claude Code's normal web-tool availability.
@@ -788,6 +797,13 @@ class Settings(BaseModel):
         if v <= 0:
             raise ValueError("messaging_rate_window must be > 0")
         return float(v)
+
+    @field_validator("auto_compact_window")
+    @classmethod
+    def validate_auto_compact_window(cls, v: int) -> int:
+        if v < 1000:
+            raise ValueError("AUTO_COMPACT_WINDOW must be >= 1000 tokens")
+        return v
 
     @field_validator("web_fetch_allowed_schemes")
     @classmethod

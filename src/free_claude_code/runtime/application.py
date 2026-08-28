@@ -408,6 +408,7 @@ class ApplicationRuntime:
             auth_token=settings.proxy_auth_token,
             log_raw_cli_diagnostics=settings.log_raw_cli_diagnostics,
             log_messaging_error_details=settings.log_messaging_error_details,
+            auto_compact_window=settings.auto_compact_window,
         )
         session_store = messaging_session.SessionStore(
             storage_path=os.path.join(data_path, "sessions.json"),

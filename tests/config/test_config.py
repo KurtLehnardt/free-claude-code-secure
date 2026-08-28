@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from free_claude_code.application.routing import ModelRouter
+from free_claude_code.config.admin.manifest import FIELD_BY_KEY
 from free_claude_code.config.constants import (
     ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
     HTTP_CONNECT_TIMEOUT_DEFAULT,
@@ -43,6 +44,7 @@ def test_settings_defaults_are_valid_and_nonempty() -> None:
     assert settings.enable_web_server_tools is True
     assert settings.proxy_auth_enabled is True
     assert settings.proxy_auth_token == "freecc"
+    assert settings.auto_compact_window == 190_000
     assert [
         name for name, value in settings if isinstance(value, str) and not value
     ] == []
@@ -88,6 +90,7 @@ def test_direct_settings_construction_performs_no_environment_io(
             900.0,
         ),
         ("HTTP_READ_TIMEOUT", "http_read_timeout", "600", 600.0),
+        ("AUTO_COMPACT_WINDOW", "auto_compact_window", "60000", 60000),
         ("FCC_OPEN_BROWSER", "open_admin_browser", "false", False),
         ("REASONING_POLICY", "reasoning_policy", "off", ReasoningPreference.OFF),
         ("GROQ_API_KEY", "groq_api_key", " secret ", "secret"),
@@ -129,6 +132,32 @@ def test_provider_progress_timeout_must_be_representable(value: float) -> None:
 def test_loader_rejects_invalid_provider_progress_timeout(value: str) -> None:
     with pytest.raises(ValidationError):
         compose_settings_snapshot({}, {"PROVIDER_PROGRESS_TIMEOUT": value})
+
+
+def test_auto_compact_window_accepts_a_small_context_model_override() -> None:
+    settings = Settings(auto_compact_window=60_000)
+
+    assert settings.auto_compact_window == 60_000
+
+
+@pytest.mark.parametrize("value", [0, -1, 999])
+def test_auto_compact_window_rejects_values_below_the_floor(value: int) -> None:
+    with pytest.raises(ValidationError, match="AUTO_COMPACT_WINDOW"):
+        Settings(auto_compact_window=value)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "999"])
+def test_loader_rejects_auto_compact_window_below_the_floor(value: str) -> None:
+    with pytest.raises(ValidationError):
+        compose_settings_snapshot({}, {"AUTO_COMPACT_WINDOW": value})
+
+
+def test_auto_compact_window_is_exposed_as_an_admin_number_field() -> None:
+    entry = FIELD_BY_KEY["AUTO_COMPACT_WINDOW"]
+
+    assert entry.settings_attr == "auto_compact_window"
+    assert entry.field_type == "number"
+    assert entry.section_id == "runtime"
 
 
 @pytest.mark.parametrize(

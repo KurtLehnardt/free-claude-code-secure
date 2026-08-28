@@ -27,17 +27,20 @@ def _config(**overrides: object) -> ManagedClaudeConfig:
             allowed_dirs.append(directory)
     claude_bin = overrides.get("claude_bin", "claude")
     auth_token = overrides.get("auth_token", "proxy-token")
+    auto_compact_window = overrides.get("auto_compact_window", 190_000)
 
     assert isinstance(workspace_path, str)
     assert isinstance(proxy_root_url, str)
     assert isinstance(claude_bin, str)
     assert isinstance(auth_token, str)
+    assert isinstance(auto_compact_window, int)
     return ManagedClaudeConfig(
         workspace_path=workspace_path,
         proxy_root_url=proxy_root_url,
         allowed_dirs=allowed_dirs,
         claude_bin=claude_bin,
         auth_token=auth_token,
+        auto_compact_window=auto_compact_window,
     )
 
 
@@ -148,9 +151,20 @@ def test_managed_claude_env_forwards_retained_proxy_auth_token() -> None:
         proxy_root_url="http://localhost:8082",
         auth_token="freecc",
         base_env={"ANTHROPIC_AUTH_TOKEN": "stale"},
+        auto_compact_window=190_000,
     )
 
     assert env["ANTHROPIC_AUTH_TOKEN"] == "freecc"
+
+
+def test_managed_claude_env_uses_configured_auto_compact_window() -> None:
+    invocation = build_managed_claude_invocation(
+        config=_config(auto_compact_window=60_000),
+        request=ManagedClaudeTaskRequest(prompt="hello"),
+        base_env={},
+    )
+
+    assert invocation.env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "60000"
 
 
 def test_managed_claude_env_adds_noninteractive_process_policy() -> None:
@@ -165,12 +179,14 @@ def test_managed_claude_env_adds_noninteractive_process_policy() -> None:
         proxy_root_url="http://localhost:8082",
         auth_token="proxy-token",
         base_env=base_env,
+        auto_compact_window=190_000,
     )
 
     managed_env = build_managed_claude_env(
         proxy_root_url="http://localhost:8082",
         auth_token="proxy-token",
         base_env=base_env,
+        auto_compact_window=190_000,
     )
 
     assert managed_env == {

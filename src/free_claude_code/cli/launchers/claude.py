@@ -46,6 +46,7 @@ def launch(argv: Sequence[str] | None = None) -> None:
             proxy_root_url=proxy_root_url,
             auth_token=settings.proxy_auth_token,
             base_env=os.environ,
+            auto_compact_window=settings.auto_compact_window,
         ),
         binary_name=binary_name,
         display_name=_DISPLAY_NAME,

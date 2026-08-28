@@ -429,6 +429,20 @@ _NON_PROVIDER_FIELDS: tuple[ConfigFieldSpec, ...] = (
         advanced=True,
     ),
     ConfigFieldSpec(
+        "AUTO_COMPACT_WINDOW",
+        "Auto-Compaction Window",
+        "runtime",
+        "number",
+        settings_attr="auto_compact_window",
+        description=(
+            "Token threshold at which the launched Claude Code CLI auto-compacts "
+            "conversation history. Lower this for small-context models (32k/64k) "
+            "so compaction fires before the provider hard-fails with a "
+            "context-overflow error."
+        ),
+        advanced=True,
+    ),
+    ConfigFieldSpec(
         "ENABLE_WEB_SERVER_TOOLS",
         "Web Server Tools",
         "web_tools",
