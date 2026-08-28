@@ -23,6 +23,7 @@ def _launcher_settings(
     token: str = "freecc",
     proxy_auth_enabled: bool = False,
     open_admin_browser: bool = True,
+    auto_compact_window: int = 190_000,
 ) -> Settings:
     return Settings(
         host=host,
@@ -31,6 +32,7 @@ def _launcher_settings(
         proxy_auth_token=token,
         model="nvidia_nim/test-model",
         open_admin_browser=open_admin_browser,
+        auto_compact_window=auto_compact_window,
     )
 
 
@@ -388,6 +390,7 @@ def test_claude_child_env_targets_current_proxy_config() -> None:
             "DISABLE_ERROR_REPORTING": "0",
             "DISABLE_TELEMETRY": "0",
         },
+        auto_compact_window=190_000,
     )
 
     assert env["PATH"] == "keep"
@@ -404,6 +407,19 @@ def test_claude_child_env_targets_current_proxy_config() -> None:
     assert "ANTHROPIC_API_URL" not in env
     assert "ANTHROPIC_API_KEY" not in env
     assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in env
+
+
+def test_claude_child_env_uses_configured_auto_compact_window() -> None:
+    from free_claude_code.cli.claude_env import build_claude_proxy_env
+
+    env = build_claude_proxy_env(
+        proxy_root_url="http://127.0.0.1:9090",
+        auth_token="proxy-token",
+        base_env={},
+        auto_compact_window=60_000,
+    )
+
+    assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "60000"
 
 
 def test_launch_claude_passes_args_and_child_env(
@@ -464,6 +480,42 @@ def test_launch_claude_passes_args_and_child_env(
     assert child_env["KEEP_ME"] == "yes"
     register_pid.assert_called_once_with(12345)
     unregister_pid.assert_called_once_with(12345)
+
+
+def test_launch_claude_uses_configured_auto_compact_window(
+    monkeypatch: pytest.MonkeyPatch,
+    empty_proxy_bypass_env: None,
+) -> None:
+    from free_claude_code.cli.launchers.claude import launch
+
+    monkeypatch.delenv("FCC_DISABLE_SECURITY_HOOKS", raising=False)
+    settings = _launcher_settings(
+        port=9191, token="proxy-token", auto_compact_window=60_000
+    )
+
+    with (
+        patch(
+            "free_claude_code.cli.launchers.claude.get_settings", return_value=settings
+        ),
+        patch(
+            "free_claude_code.cli.launchers.claude.preflight_proxy", return_value=None
+        ),
+        patch(
+            "free_claude_code.cli.launchers.common.shutil.which",
+            return_value="resolved-claude.cmd",
+        ),
+        patch("free_claude_code.cli.launchers.common.subprocess.Popen") as popen,
+        patch("free_claude_code.cli.launchers.common.register_pid"),
+        patch("free_claude_code.cli.launchers.common.unregister_pid"),
+        pytest.raises(SystemExit),
+    ):
+        process = popen.return_value
+        process.pid = 12345
+        process.wait.return_value = 0
+        launch([])
+
+    child_env = popen.call_args.kwargs["env"]
+    assert child_env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "60000"
 
 
 def test_launch_codex_passes_responses_config_and_child_env(

@@ -11,6 +11,7 @@ from free_claude_code.cli.process_registry import (
     register_pid,
     unregister_pid,
 )
+from free_claude_code.config.constants import AUTO_COMPACT_WINDOW_DEFAULT
 from free_claude_code.core.trace import trace_event
 
 from .claude import (
@@ -38,6 +39,7 @@ class ManagedClaudeSession:
         *,
         auth_token: str,
         log_raw_cli_diagnostics: bool = False,
+        auto_compact_window: int = AUTO_COMPACT_WINDOW_DEFAULT,
     ):
         self.config = ManagedClaudeConfig(
             workspace_path=os.path.normpath(os.path.abspath(workspace_path)),
@@ -45,6 +47,7 @@ class ManagedClaudeSession:
             allowed_dirs=[os.path.normpath(d) for d in (allowed_dirs or [])],
             claude_bin=claude_bin,
             auth_token=auth_token,
+            auto_compact_window=auto_compact_window,
         )
         self.workspace = self.config.workspace_path
         self.proxy_root_url = self.config.proxy_root_url

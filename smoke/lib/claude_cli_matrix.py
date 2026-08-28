@@ -105,6 +105,7 @@ def run_claude_cli(
         proxy_root_url=server.base_url,
         auth_token=config.settings.proxy_auth_token,
         base_env=os.environ,
+        auto_compact_window=config.settings.auto_compact_window,
     )
     env["TERM"] = "dumb"
     env["NO_COLOR"] = "1"
