@@ -497,6 +497,8 @@ intended provider host from an attacker-controlled one.
 
 ## Recommended free providers
 
+<img width="1703" height="589" alt="image" src="https://github.com/user-attachments/assets/061268c9-7f40-481a-9804-cf5351f0ae4a" />
+
 Free Claude Code routes your coding agent to whichever provider you configure. These
 cloud providers offer **permanent free tiers or free models** and are supported out of
 the box — pick one, grab an API key, set it (e.g. `GROQ_API_KEY`) and a `MODEL`:
