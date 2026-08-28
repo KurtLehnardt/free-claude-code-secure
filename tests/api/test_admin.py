@@ -349,7 +349,9 @@ def test_admin_static_model_combobox_owns_dropdown_and_search_behavior():
     assert 'document.createElement("datalist")' not in script
     assert ".model-combobox-list" in styles
     assert ".model-combobox-option.active" in styles
-    assert styles.count("background-image: var(--dropdown-chevron)") == 2
+    # 3 uses: the model field/model-combobox-toggle chevrons plus the
+    # provider-sort select, which reuses the same custom dropdown chevron.
+    assert styles.count("background-image: var(--dropdown-chevron)") == 3
 
 
 def test_admin_static_model_combobox_preserves_custom_slugs_and_none_semantics():
