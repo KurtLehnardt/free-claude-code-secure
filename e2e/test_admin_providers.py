@@ -128,3 +128,42 @@ def test_multi_field_provider_targets_first_missing_configuration(
 
     expect(account_input).to_be_in_viewport()
     expect(account_input).to_be_focused()
+
+
+def _provider_grid_order(page: Page) -> list[str]:
+    return page.locator("#providerGrid .provider-card").evaluate_all(
+        "cards => cards.map((card) => card.dataset.provider)"
+    )
+
+
+def test_provider_sort_control_orders_by_configuration_and_persists(
+    page: Page,
+    admin_base_url: str,
+) -> None:
+    _open_admin(page, admin_base_url, {"width": 1280, "height": 720})
+    sort_select = page.locator("#providerSortSelect")
+
+    # (a) Default is catalog order: "nvidia_nim" (missing
+    # NVIDIA_NIM_API_KEY, unconfigured) precedes "open_router" (configured
+    # via OPENROUTER_API_KEY) in PROVIDER_CATALOG, and the default order
+    # preserves that.
+    expect(sort_select).to_have_value("catalog")
+    catalog_order = _provider_grid_order(page)
+    assert catalog_order.index("nvidia_nim") < catalog_order.index("open_router")
+
+    # (b) Selecting "configured-first" moves the configured provider
+    # (open_router) ahead of the unconfigured one (nvidia_nim).
+    sort_select.select_option("configured-first")
+    configured_first_order = _provider_grid_order(page)
+    assert configured_first_order.index("open_router") < configured_first_order.index(
+        "nvidia_nim"
+    )
+    # The set of rendered providers is unchanged - only their order moved.
+    assert sorted(configured_first_order) == sorted(catalog_order)
+
+    # (c) The choice is persisted in localStorage and survives a reload.
+    page.reload()
+    expect(page.locator("#messageArea")).to_have_text("")
+    expect(sort_select).to_have_value("configured-first")
+    reloaded_order = _provider_grid_order(page)
+    assert reloaded_order.index("open_router") < reloaded_order.index("nvidia_nim")

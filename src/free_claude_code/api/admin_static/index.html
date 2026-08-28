@@ -46,6 +46,17 @@
             <section class="provider-strip" aria-label="Provider status">
               <div class="strip-header">
                 <h3>Providers</h3>
+                <div class="provider-sort">
+                  <label for="providerSortSelect">Sort by</label>
+                  <select
+                    id="providerSortSelect"
+                    aria-label="Sort providers by configuration status"
+                  >
+                    <option value="catalog">Order: Catalog default</option>
+                    <option value="configured-first">Order: Configured first</option>
+                    <option value="unconfigured-first">Order: Unconfigured first</option>
+                  </select>
+                </div>
               </div>
               <div id="providerGrid" class="provider-grid"></div>
             </section>

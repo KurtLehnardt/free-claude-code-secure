@@ -5,10 +5,20 @@ const state = {
   modelComboboxes: new Set(),
   authPollers: new Map(),
   activeView: "providers",
+  providerSort: "catalog",
 };
 
 const MASKED_SECRET = "********";
 const NULL_VALUE = "__FCC_NULL__";
+const PROVIDER_SORT_STORAGE_KEY = "fcc.providerSort";
+const PROVIDER_SORT_MODES = new Set([
+  "catalog",
+  "configured-first",
+  "unconfigured-first",
+]);
+// The single source of truth for "configured": mirrors the status pills
+// users already see (statusClass below maps these statuses to the "ok" pill).
+const OK_STATUSES = ["configured", "reachable", "running", "connected"];
 const VIEW_GROUPS = [
   {
     id: "providers",
@@ -57,10 +67,61 @@ function sourceText(field) {
 }
 
 function statusClass(status) {
-  if (["configured", "reachable", "running", "connected"].includes(status)) return "ok";
+  if (OK_STATUSES.includes(status)) return "ok";
   if (["missing_key", "missing_config", "missing_url", "unknown", "connecting"].includes(status)) return "warn";
   if (["offline", "error"].includes(status)) return "error";
   return "neutral";
+}
+
+function isProviderConfigured(provider) {
+  return OK_STATUSES.includes(provider.status);
+}
+
+function sortProvidersForDisplay(providers, mode) {
+  if (mode !== "configured-first" && mode !== "unconfigured-first") {
+    return providers;
+  }
+  // Array.prototype.filter preserves relative order, so partitioning into
+  // two groups and concatenating them is a stable sort: providers never
+  // reorder relative to others within the same configured/unconfigured group.
+  const configured = providers.filter(isProviderConfigured);
+  const unconfigured = providers.filter((provider) => !isProviderConfigured(provider));
+  return mode === "configured-first"
+    ? [...configured, ...unconfigured]
+    : [...unconfigured, ...configured];
+}
+
+function readProviderSortPreference() {
+  try {
+    const stored = window.localStorage.getItem(PROVIDER_SORT_STORAGE_KEY);
+    return PROVIDER_SORT_MODES.has(stored) ? stored : "catalog";
+  } catch {
+    return "catalog";
+  }
+}
+
+function writeProviderSortPreference(mode) {
+  try {
+    window.localStorage.setItem(PROVIDER_SORT_STORAGE_KEY, mode);
+  } catch {
+    // Storage may be unavailable (e.g. private browsing); the in-memory
+    // selection still applies for the rest of this page session.
+  }
+}
+
+function initProviderSortControl() {
+  const select = byId("providerSortSelect");
+  if (!select) return;
+  state.providerSort = readProviderSortPreference();
+  select.value = state.providerSort;
+  select.addEventListener("change", () => {
+    const mode = PROVIDER_SORT_MODES.has(select.value) ? select.value : "catalog";
+    state.providerSort = mode;
+    writeProviderSortPreference(mode);
+    if (state.config) {
+      renderProviders(state.config.provider_status);
+    }
+  });
 }
 
 async function api(path, options = {}) {
@@ -155,11 +216,15 @@ function renderProviders(providerStatus) {
     (provider) => provider.kind === "connected_account",
   );
   byId("connectedAccountsSection").hidden = connected.length === 0;
-  providerStatus.forEach((provider) => {
-    if (provider.kind === "connected_account") {
-      connectedGrid.appendChild(renderConnectedAccountCard(provider));
-      return;
-    }
+  connected.forEach((provider) => {
+    connectedGrid.appendChild(renderConnectedAccountCard(provider));
+  });
+
+  const mainProviders = providerStatus.filter(
+    (provider) => provider.kind !== "connected_account",
+  );
+  const sortedProviders = sortProvidersForDisplay(mainProviders, state.providerSort);
+  sortedProviders.forEach((provider) => {
     const card = document.createElement("article");
     card.className = "provider-card";
     card.dataset.provider = provider.provider_id;
@@ -1202,6 +1267,8 @@ document.addEventListener("pointerdown", (event) => {
     if (combobox.isOpen && !combobox.element.contains(event.target)) combobox.close();
   });
 });
+
+initProviderSortControl();
 
 load().catch((error) => {
   showMessage(error.message, "error");
