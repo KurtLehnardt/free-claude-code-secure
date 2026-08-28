@@ -56,6 +56,7 @@ class NvidiaNimProvider(OpenAIChatProvider):
         *,
         nim_settings: NimSettings,
         admission: ProviderAdmissionController,
+        enable_reasoning_control: bool = True,
     ):
         super().__init__(
             config,
@@ -63,6 +64,7 @@ class NvidiaNimProvider(OpenAIChatProvider):
             admission=admission,
         )
         self._nim_settings = nim_settings
+        self._enable_reasoning_control = enable_reasoning_control
 
     def _build_request_body(
         self,
@@ -75,6 +77,7 @@ class NvidiaNimProvider(OpenAIChatProvider):
             request,
             self._nim_settings,
             reasoning=reasoning,
+            enable_reasoning_control=self._enable_reasoning_control,
         )
 
     def _prepare_create_body(self, body: dict[str, Any]) -> dict[str, Any]:

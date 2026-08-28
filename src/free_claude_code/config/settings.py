@@ -556,6 +556,16 @@ class Settings(BaseModel):
         default=ReasoningPreference.INHERIT,
         validation_alias="REASONING_HAIKU",
     )
+    # When true (default), the NVIDIA NIM provider honors an explicit
+    # REASONING_POLICY / REASONING_* "off" by sending
+    # chat_template_kwargs.thinking=false (plus enable_thinking=false) on the wire,
+    # which stops nemotron from spending output tokens on a hidden reasoning block.
+    # Reasoning-on requests (thinking=true, budget mapping) are unaffected either
+    # way. Disable only if a specific NIM-routed model rejects chat_template_kwargs.
+    enable_nim_reasoning_control: bool = Field(
+        default=True,
+        validation_alias="ENABLE_NIM_REASONING_CONTROL",
+    )
 
     # ==================== HTTP Client Timeouts ====================
     http_read_timeout: float = Field(

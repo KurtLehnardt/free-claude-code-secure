@@ -672,3 +672,82 @@ class TestBuildRequestBody:
         body = {"model": "test", "messages": [{"role": "user", "content": "hi"}]}
 
         assert clone_body_without_reasoning_content(body) is None
+
+
+class TestNimReasoningControlFlag:
+    """ENABLE_NIM_REASONING_CONTROL gates only the reasoning-off encoding.
+
+    Verified live against integrate.api.nvidia.com for
+    nvidia/nemotron-3-super-120b-a12b: chat_template_kwargs.thinking=false is the
+    only mechanism that actually disables reasoning (dropped completion_tokens
+    32->2 and removed the reasoning field); system directives and a top-level
+    ``thinking`` object did not work.
+    """
+
+    def test_flag_on_and_reasoning_off_disables_thinking_on_the_wire(self, req):
+        body = build_request_body(
+            req,
+            NimSettings(),
+            reasoning=REASONING_OFF,
+            enable_reasoning_control=True,
+        )
+
+        assert body["extra_body"]["chat_template_kwargs"] == {
+            "thinking": False,
+            "enable_thinking": False,
+        }
+
+    def test_flag_on_and_reasoning_on_still_enables_thinking(self, req):
+        body = build_request_body(
+            req,
+            NimSettings(),
+            reasoning=REASONING_ON,
+            enable_reasoning_control=True,
+        )
+
+        assert body["extra_body"]["chat_template_kwargs"] == {
+            "thinking": True,
+            "enable_thinking": True,
+        }
+
+    def test_flag_off_reasoning_on_is_unaffected(self, req):
+        """The flag is an off-path escape hatch; reasoning-on encoding never changes."""
+        enabled_body = build_request_body(
+            req,
+            NimSettings(),
+            reasoning=REASONING_ON,
+            enable_reasoning_control=True,
+        )
+        disabled_body = build_request_body(
+            req,
+            NimSettings(),
+            reasoning=REASONING_ON,
+            enable_reasoning_control=False,
+        )
+
+        assert disabled_body["extra_body"]["chat_template_kwargs"] == {
+            "thinking": True,
+            "enable_thinking": True,
+        }
+        assert disabled_body["extra_body"] == enabled_body["extra_body"]
+
+    def test_flag_off_reasoning_off_adds_no_chat_template_kwargs(self, req):
+        """With the flag off, an explicit reasoning-off request is a pure no-op,
+        matching the legacy NO_REASONING strategy byte-for-byte in extra_body."""
+        disabled_off_body = build_request_body(
+            req,
+            NimSettings(),
+            reasoning=REASONING_OFF,
+            enable_reasoning_control=False,
+        )
+        no_reasoning_equivalent = build_request_body(
+            req,
+            NimSettings(),
+            reasoning=ReasoningPolicy.provider_default(),
+        )
+
+        extra = disabled_off_body.get("extra_body", {})
+        assert "chat_template_kwargs" not in extra
+        for param in ("thinking", "enable_thinking", "reasoning_budget"):
+            assert param not in extra
+        assert extra == no_reasoning_equivalent.get("extra_body", {})

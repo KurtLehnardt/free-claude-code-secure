@@ -214,6 +214,26 @@ async def test_build_request_body_encodes_explicit_reasoning_off(
 
 
 @pytest.mark.asyncio
+async def test_build_request_body_reasoning_off_is_a_no_op_when_flag_disabled(
+    provider_config,
+):
+    """ENABLE_NIM_REASONING_CONTROL=false restores the legacy NO_REASONING no-op:
+    an explicit REASONING_*=off no longer reaches the wire as chat_template_kwargs."""
+    provider = NvidiaNimProvider(
+        provider_config,
+        nim_settings=NimSettings(),
+        admission=immediate_admission(),
+        enable_reasoning_control=False,
+    )
+    req = make_request()
+    body = provider._build_request_body(req, reasoning=REASONING_OFF)
+
+    extra = body.get("extra_body", {})
+    assert "chat_template_kwargs" not in extra
+    assert "reasoning_budget" not in extra
+
+
+@pytest.mark.asyncio
 async def test_build_request_body_omits_reasoning_when_request_disables_thinking(
     provider_config,
 ):
