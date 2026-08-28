@@ -517,6 +517,31 @@ the box — pick one, grab an API key, set it (e.g. `GROQ_API_KEY`) and a `MODEL
 > Gemini, or an OpenRouter `:free` model with a big context window — since small-context
 > free models can reject the request as too large. See [Choose a provider](#choose-a-provider).
 
+### Stretch your free quota
+
+A coding agent re-sends the whole conversation every turn (stateless APIs have no
+server-side memory), so multi-turn sessions are input-heavy. Three settings — all
+toggleable in the **Admin UI** — reclaim a lot of that:
+
+- **Route cheap turns to a small model.** Claude Code tags background work (title
+  generation, quick edits) as the "haiku" tier. Set `MODEL_HAIKU` to a small fast
+  model and `REASONING_HAIKU=off` so those turns skip your big-model quota and don't
+  burn output tokens "thinking":
+
+  ```bash
+  MODEL_HAIKU="nvidia_nim/meta/llama-3.3-70b-instruct"
+  REASONING_HAIKU=off
+  ```
+
+- **Use a caching provider for long sessions.** NVIDIA NIM and Groq don't cache, so
+  the re-sent prefix is fully reprocessed each turn (the dominant cost). A provider
+  with automatic prefix caching — e.g. **DeepSeek** — reclaims most of it; FCC reports
+  the savings as `cache_read_input_tokens`.
+
+- **Built-in fast-paths.** FCC already short-circuits several agent housekeeping
+  requests (title generation, suggestion mode, quota probes) to **zero tokens** by
+  default — see the optimization toggles in the Admin UI.
+
 
 ## What You Get
 
