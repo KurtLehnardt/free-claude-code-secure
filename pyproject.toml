@@ -32,7 +32,7 @@ dependencies = [
     "starlette>=1.6.0",  # fastapi 0.141.1 only requires >=0.46.0; raises the floor past GHSA-86qp/jp82/wqp7/x746/82w8
     "python-multipart>=0.0.32",  # fixes 6 DoS/param-smuggling advisories (GHSA-5rvq/6jv3/mj87/pp6c/v9pg/vffw)
     "urllib3>=2.8.0",  # fixes GHSA-mf9v/qccp plus CVE-2026-97687/97688/97689
-    "anyio>=4.14.2,<4.15.0",  # fixes CVE-2026-63374, CVE-2026-64847; capped below 4.15 because
+    "anyio>=4.14.2,<4.16.0",  # fixes CVE-2026-63374, CVE-2026-64847; capped below 4.15 because
     # starlette 1.6.0's TestClient still imports the anyio.abc.BlockingPortal alias that 4.15
     # deprecated, which fires as DeprecationWarning (fatal under our filterwarnings=error); raise
     # the cap once starlette ships the anyio.from_thread.BlockingPortal fix.
