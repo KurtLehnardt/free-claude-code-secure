@@ -18,6 +18,7 @@ from free_claude_code.application.model_metadata import (
     ProviderModelInfo,
     ProviderModelRefreshResult,
 )
+from free_claude_code.config.admin.manifest import FIELDS
 from free_claude_code.config.admin.values import MASKED_SECRET
 from free_claude_code.config.provider_catalog import PROVIDER_CATALOG
 from free_claude_code.config.server_urls import local_admin_url
@@ -35,35 +36,23 @@ def _set_home(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
 
 
+# Env vars outside the Admin config manifest (FIELDS) that still need clearing for
+# test isolation -- e.g. alternate env-file selection and CLI-launch settings.
+_NON_MANIFEST_PROCESS_KEYS = (
+    "FCC_ENV_FILE",
+    "LOG_FILE",
+    "ZAI_BASE_URL",
+    "CLAUDE_WORKSPACE",
+    "CLAUDE_CLI_BIN",
+)
+
+
 def _clear_process_config(monkeypatch) -> None:
-    for key in (
-        "MODEL",
-        "MODEL_FALLBACKS",
-        "NVIDIA_NIM_API_KEY",
-        "HUGGINGFACE_API_KEY",
-        "OPENROUTER_API_KEY",
-        "AWS_BEARER_TOKEN_BEDROCK",
-        "BEDROCK_BASE_URL",
-        "BEDROCK_PROXY",
-        "OLLAMA_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "PROXY_AUTH_ENABLED",
-        "TELEGRAM_PROXY_URL",
-        "FCC_ENV_FILE",
-        "CLOUDFLARE_API_TOKEN",
-        "CLOUDFLARE_ACCOUNT_ID",
-        "GITHUB_MODELS_TOKEN",
-        "SAMBANOVA_API_KEY",
-        "HOST",
-        "PORT",
-        "FCC_OPEN_BROWSER",
-        "VOICE_NOTE_ENABLED",
-        "WHISPER_DEVICE",
-        "LOG_FILE",
-        "ZAI_BASE_URL",
-        "CLAUDE_WORKSPACE",
-        "CLAUDE_CLI_BIN",
-    ):
+    # Derived from FIELDS (not hand-maintained) so this never drifts out of sync as
+    # providers are added: a stale subset here lets a real env var on the host
+    # machine (e.g. a developer's own GEMINI_API_KEY) silently "lock" that field as
+    # process-sourced, making Admin writes to it a no-op during tests.
+    for key in {field.key for field in FIELDS} | set(_NON_MANIFEST_PROCESS_KEYS):
         monkeypatch.delenv(key, raising=False)
 
 
