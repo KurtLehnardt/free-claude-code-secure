@@ -23,7 +23,7 @@ set -eu
 
 FCC_REPO_URL="https://github.com/KurtLehnardt/free-claude-code-secure"
 # Default pinned Free Claude Code commit (real, verified secure-fork main HEAD).
-FCC_COMMIT="88b99da8931222268b1e8c5b55acac5d44f66711"
+FCC_COMMIT="f9cad38bcfd687652f27c45ff137f31845a13272"
 PYTHON_VERSION="3.14.0"
 MIN_UV_VERSION="0.11.16"
 # uv is pinned to a versioned astral-sh/uv release artifact (not the rolling
@@ -1819,12 +1819,28 @@ install_free_claude_code() {
     # only added when the installed uv supports them.
     set -- uv tool install --force --refresh-package free-claude-code --python "$PYTHON_VERSION"
 
+    # Pin FCC's full dependency closure via a uv export -> constraints file. This
+    # works on every uv version, unlike --locked below: current uv (0.12.x)
+    # removed --locked from `uv tool install` silently (it is dropped rather than
+    # rejected), so an install relying on --locked alone is quietly unpinned on
+    # current uv. Only reached on the pinned-commit path, where a checkout dir
+    # (and its uv.lock) exists; the --allow-unpinned archive path has neither.
+    if [ "$dry_run" -eq 1 ]; then
+        constraints_file="<temporary-checkout>/fcc-constraints.txt"
+    else
+        constraints_file="$temporary_dir/fcc-constraints.txt"
+    fi
+    run uv export --project "${fcc_checkout_dir:-<temporary-checkout>}" --frozen \
+        --format requirements-txt --no-emit-project --no-dev --quiet -o "$constraints_file"
+    set -- "$@" --constraints "$constraints_file"
+
     # Pin FCC's full dependency closure (not just its own source tree) by making
-    # uv honor the checkout's uv.lock. --locked is added ONLY when the installed
-    # uv advertises it (capability check), so an older/newer uv that does not
-    # accept the flag never breaks the install. If a future uv rejects --locked
-    # for a "pkg[extras] @ file://<checkout>" requirement, remove it here and
-    # install from the checkout in project mode instead, e.g.:
+    # uv honor the checkout's uv.lock too. --locked is added ONLY when the
+    # installed uv advertises it (capability check), so an older/newer uv that
+    # does not accept the flag never breaks the install; the --constraints file
+    # above already pins the dependency closure either way. If a future uv
+    # rejects --locked for a "pkg[extras] @ file://<checkout>" requirement,
+    # remove it here and install from the checkout in project mode instead, e.g.:
     #   (cd "$fcc_checkout_dir" && uv tool install --force --locked \
     #        --python "$PYTHON_VERSION" ".[voice,voice_local]")
     if uv_locked_supported; then
