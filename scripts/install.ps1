@@ -56,7 +56,7 @@ $ProgressPreference = "SilentlyContinue"
 $FccRepoUrl = "https://github.com/KurtLehnardt/free-claude-code-secure"
 # Default pinned Free Claude Code commit. MUST match install.sh's FCC_COMMIT so
 # both installers pin the exact same source tree (real, verified secure-fork main HEAD).
-$FccCommit = "88b99da8931222268b1e8c5b55acac5d44f66711"
+$FccCommit = "f9cad38bcfd687652f27c45ff137f31845a13272"
 # Windows on ARM emulates x64, whose Python package ecosystem has broader wheel support.
 $PythonRequest = "cpython-3.14.0-windows-x86_64-none"
 $MinUvVersion = "0.11.16"
@@ -1718,9 +1718,31 @@ function Install-FreeClaudeCode {
         "--python",
         $PythonRequest
     )
-    # Pin FCC's full dependency closure by honoring the checkout's uv.lock, but
-    # only when the installed uv advertises --locked (capability check), so an
-    # older/newer uv that does not accept the flag never breaks the install.
+    # Pin FCC's full dependency closure via a uv export -> constraints file. This
+    # works on every uv version, unlike --locked below: current uv (0.12.x)
+    # removed --locked from 'uv tool install' silently (it is dropped rather
+    # than rejected), so an install relying on --locked alone is quietly
+    # unpinned on current uv. Only reached on the pinned-commit path, where a
+    # checkout dir (and its uv.lock) exists; the -AllowUnpinned archive path
+    # has neither.
+    if ($DryRun) {
+        $constraintsFile = "<temporary-checkout>/fcc-constraints.txt"
+        $exportProjectDir = "<temporary-checkout>"
+    }
+    else {
+        $constraintsFile = Join-Path (Split-Path -Parent $checkoutDir) "fcc-constraints.txt"
+        $exportProjectDir = $checkoutDir
+    }
+    Invoke-NativeCommand -FilePath $uvPath -Arguments @(
+        "export", "--project", $exportProjectDir, "--frozen", "--format", "requirements-txt",
+        "--no-emit-project", "--no-dev", "--quiet", "-o", $constraintsFile
+    )
+    $arguments += @("--constraints", $constraintsFile)
+    # Pin FCC's full dependency closure (not just its own source tree) by
+    # honoring the checkout's uv.lock too, when the installed uv advertises
+    # --locked (capability check), so an older/newer uv that does not accept
+    # the flag never breaks the install; the --constraints file above already
+    # pins the dependency closure either way.
     if ((-not $DryRun) -and (Test-UvLockedSupported -UvPath $uvPath)) {
         $arguments += "--locked"
     }

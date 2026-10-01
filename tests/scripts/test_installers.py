@@ -266,6 +266,20 @@ if [ "${{1:-}}" = "--version" ]; then
     echo "uv {version}"
     exit 0
 fi
+if [ "${{1:-}}" = "export" ]; then
+    out=""
+    prev=""
+    for a in "$@"; do
+        if [ "$prev" = "-o" ]; then
+            out="$a"
+        fi
+        prev="$a"
+    done
+    if [ -n "$out" ]; then
+        : > "$out"
+    fi
+    exit 0
+fi
 if [ "${{1:-}}" = "tool" ] && [ "${{2:-}}" = "install" ]; then
     if [ "${{3:-}}" = "--help" ]; then
         echo "  --locked    Assert that uv.lock remains unchanged"
@@ -774,16 +788,25 @@ def test_install_sh_fresh_install_is_verified(posix_harness: PosixHarness) -> No
         for call in calls
     )
     assert any(
-        "checkout --detach 88b99da8931222268b1e8c5b55acac5d44f66711" in call
+        "checkout --detach f9cad38bcfd687652f27c45ff137f31845a13272" in call
         for call in calls
     )
     assert any(call.endswith("rev-parse HEAD") for call in calls)
     assert any(
         call.startswith(
             "uv:tool install --force --refresh-package free-claude-code "
-            "--python 3.14.0 --locked free-claude-code @ file://"
+            "--python 3.14.0 --constraints "
         )
+        and " --locked free-claude-code @ file://" in call
         and "main.zip" not in call
+        for call in calls
+    )
+    # The dependency closure is pinned via a uv export -> constraints file
+    # (works on every uv version), independent of --locked support above.
+    assert any(
+        call.startswith("uv:export --project ")
+        and "--frozen" in call
+        and " -o " in call
         for call in calls
     )
     assert calls[-3:] == [
@@ -1903,10 +1926,23 @@ def _batch_uv(version: str) -> str:
     return rf"""@echo off
 echo uv:%*>>"%CALL_LOG%"
 if "%1"=="--version" goto version
+if "%1"=="export" goto export
 if "%1"=="tool" if "%2"=="install" goto install
 if "%1"=="tool" if "%2"=="update-shell" goto update_shell
 if "%1"=="tool" if "%2"=="dir" if "%3"=="--bin" goto tool_bin
 exit /b 59
+:export
+set "OUT="
+set "PREV="
+:exportloop
+if "%~1"=="" goto exportdone
+if "%PREV%"=="-o" set "OUT=%~1"
+set "PREV=%~1"
+shift
+goto exportloop
+:exportdone
+if defined OUT type nul > "%OUT%"
+exit /b 0
 :version
 if "%FCC_RUNNING_PHASE%"=="late" type nul > "%FCC_PROCESS_MARKER%"
 if "%FAIL_STEP%"=="uv-verify" exit /b 52
@@ -3111,7 +3147,7 @@ def test_installers_use_native_clients_and_single_python_selection() -> None:
         # commit and referenced via file://, never the unpinned main.zip archive.
         assert "main.zip" not in text
         assert "https://github.com/KurtLehnardt/free-claude-code-secure" in text
-        assert "88b99da8931222268b1e8c5b55acac5d44f66711" in text
+        assert "f9cad38bcfd687652f27c45ff137f31845a13272" in text
         assert "checkout --detach" in text
         assert "rev-parse" in text
         assert "python install" not in text
